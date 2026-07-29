@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="950" viewBox="0 0 1060 950" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <path d="M0,0 L10,3.5 L0,7 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <path d="M0,0 L10,3.5 L0,7 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="1060" height="950" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="530" y="40" text-anchor="middle" font-size="22" font-weight="bold" fill="#0f172a">SQLBot — CURRENT Architecture (before update)</text>
+  <text x="530" y="64" text-anchor="middle" font-size="13" fill="#64748b">Linear one-shot pipeline · apps/chat/task/llm.py · one datasource, no feedback loops</text>
+
+  <!-- ===================== INGESTION COLUMN ===================== -->
+  <text x="175" y="110" text-anchor="middle" font-size="12" font-weight="bold" fill="#64748b">INGESTION (at upload time)</text>
+
+  <rect x="40" y="124" width="270" height="60" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="175" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#334155">1. Document / Excel upload</text>
+  <text x="175" y="168" text-anchor="middle" font-size="11.5" fill="#64748b">Vue 3 frontend → FastAPI</text>
+
+  <line x1="175" y1="184" x2="175" y2="222" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="40" y="224" width="270" height="60" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="175" y="248" text-anchor="middle" font-size="13" font-weight="bold" fill="#334155">2. Parse with pandas</text>
+  <text x="175" y="268" text-anchor="middle" font-size="11.5" fill="#64748b">header detection, multiple sheets</text>
+
+  <line x1="175" y1="284" x2="175" y2="322" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="40" y="324" width="270" height="68" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="175" y="348" text-anchor="middle" font-size="13" font-weight="bold" fill="#334155">3. Store in PostgreSQL</text>
+  <text x="175" y="368" text-anchor="middle" font-size="11.5" fill="#64748b">each sheet → SQL table (datasource)</text>
+
+  <line x1="175" y1="392" x2="175" y2="430" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="40" y="432" width="270" height="84" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="175" y="456" text-anchor="middle" font-size="13" font-weight="bold" fill="#334155">4. Embed name + description</text>
+  <text x="175" y="476" text-anchor="middle" font-size="11.5" fill="#64748b">mxbai-embed-large @ Ollama</text>
+  <text x="175" y="494" text-anchor="middle" font-size="11.5" fill="#64748b">stored per datasource</text>
+
+  <!-- embeddings used in step 1 -->
+  <line x1="310" y1="474" x2="366" y2="302" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowGray)"/>
+  <text x="318" y="402" font-size="10" fill="#94a3b8">embeddings</text>
+
+  <!-- ===================== CHAT PIPELINE COLUMN ===================== -->
+  <text x="545" y="110" text-anchor="middle" font-size="12" font-weight="bold" fill="#64748b">CHAT PIPELINE (per question)</text>
+
+  <rect x="370" y="124" width="350" height="60" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="148" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">User question</text>
+  <text x="545" y="168" text-anchor="middle" font-size="11.5" fill="#64748b">POST /chat → LLMService</text>
+
+  <line x1="545" y1="184" x2="545" y2="222" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="224" width="350" height="128" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="248" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">STEP 1 · select_datasource()   llm.py:584</text>
+  <text x="545" y="272" text-anchor="middle" font-size="11.5" fill="#475569">· embed question → cosine vs datasource embeddings</text>
+  <text x="545" y="290" text-anchor="middle" font-size="11.5" fill="#475569">· sort candidates by similarity</text>
+  <text x="545" y="308" text-anchor="middle" font-size="11.5" fill="#475569">· ONE LLM call picks a single datasource</text>
+  <text x="545" y="328" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#b91c1c">→ output: exactly ONE datasource id</text>
+
+  <line x1="545" y1="352" x2="545" y2="390" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="392" width="350" height="72" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="416" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">STEP 2 · Generate SQL</text>
+  <text x="545" y="438" text-anchor="middle" font-size="11.5" fill="#475569">single attempt · schema of the chosen datasource only</text>
+
+  <line x1="545" y1="464" x2="545" y2="502" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="504" width="350" height="72" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="528" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">STEP 3 · Execute SQL</text>
+  <text x="545" y="548" text-anchor="middle" font-size="11.5" fill="#475569">on the ONE chosen datasource</text>
+  <text x="545" y="566" text-anchor="middle" font-size="11.5" fill="#475569">PostgreSQL · MySQL · Oracle · DM · Hive</text>
+
+  <line x1="545" y1="576" x2="545" y2="614" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="616" width="350" height="72" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="640" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">STEP 4 · Answer + chart</text>
+  <text x="545" y="662" text-anchor="middle" font-size="11.5" fill="#475569">LLM summarizes result · G2-SSR renders chart</text>
+
+  <line x1="545" y1="688" x2="545" y2="726" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="728" width="350" height="56" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="545" y="761" text-anchor="middle" font-size="13" font-weight="bold" fill="#1e40af">Response streamed to user</text>
+
+  <!-- ===================== FAILURE MODES COLUMN ===================== -->
+  <text x="905" y="210" text-anchor="middle" font-size="12" font-weight="bold" fill="#b91c1c">FAILURE MODES (today)</text>
+
+  <rect x="780" y="224" width="250" height="96" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="905" y="248" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#b91c1c">✗ Wrong pick = chain fails</text>
+  <text x="905" y="268" text-anchor="middle" font-size="11" fill="#7f1d1d">no verification, no retry —</text>
+  <text x="905" y="284" text-anchor="middle" font-size="11" fill="#7f1d1d">every later step inherits</text>
+  <text x="905" y="300" text-anchor="middle" font-size="11" fill="#7f1d1d">the mistake</text>
+
+  <rect x="780" y="352" width="250" height="80" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="905" y="376" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#b91c1c">✗ Single datasource only</text>
+  <text x="905" y="396" text-anchor="middle" font-size="11" fill="#7f1d1d">cannot combine evidence</text>
+  <text x="905" y="412" text-anchor="middle" font-size="11" fill="#7f1d1d">from two documents</text>
+
+  <rect x="780" y="504" width="250" height="88" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="905" y="528" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#b91c1c">✗ No result grading</text>
+  <text x="905" y="548" text-anchor="middle" font-size="11" fill="#7f1d1d">empty / wrong-column results</text>
+  <text x="905" y="564" text-anchor="middle" font-size="11" fill="#7f1d1d">flow through silently</text>
+
+  <!-- connectors -->
+  <line x1="780" y1="268" x2="722" y2="280" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="4,4"/>
+  <line x1="780" y1="388" x2="722" y2="320" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="4,4"/>
+  <line x1="780" y1="546" x2="722" y2="540" stroke="#ef4444" stroke-width="1.2" stroke-dasharray="4,4"/>
+
+  <!-- ===================== RUNTIME STRIP ===================== -->
+  <rect x="40" y="840" width="990" height="72" rx="10" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="535" y="864" text-anchor="middle" font-size="12.5" font-weight="bold" fill="#334155">RUNTIME — docker image sqlbot:local</text>
+  <text x="535" y="888" text-anchor="middle" font-size="11.5" fill="#64748b">FastAPI :8000 · MCP :8001  |  LLM: any OpenAI-compatible endpoint  |  embeddings: mxbai-embed-large @ Ollama  |  PostgreSQL 17 internal  |  G2-SSR (Node) charts</text>
+
+  <text x="535" y="936" text-anchor="middle" font-size="12" font-style="italic" fill="#ef4444">All arrows point one way — there is no feedback loop anywhere in this pipeline.</text>
+</svg>

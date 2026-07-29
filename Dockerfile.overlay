@@ -1,0 +1,25 @@
+# Overlay build: reuse the published dataease/sqlbot image, copy the locally
+# modified (newer) backend on top, rebuild the frontend with the local source,
+# and install the only dependencies the newer code adds (the Hive/Thrift
+# stack). Skips the Aliyun base images entirely.
+
+# --- frontend rebuild (only the parts we actually changed need this) -------
+FROM node:20-alpine AS ui
+WORKDIR /ui
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install --no-audit --no-fund --no-progress
+COPY frontend ./
+RUN npm run build
+
+# --- runtime overlay -------------------------------------------------------
+FROM dataease/sqlbot:latest
+
+COPY backend /opt/sqlbot/app
+COPY --from=ui /ui/dist /opt/sqlbot/frontend/dist
+
+# The newer backend adds Hive support (apps/db/db.py imports pyhive). Install
+# just the missing packages into the existing venv; everything else is already
+# present in the published image.
+RUN uv pip install --python /opt/sqlbot/app/.venv/bin/python \
+    --index-url https://pypi.org/simple/ \
+    "pyhive[hive_pure_sasl]>=0.7.0" thrift-sasl

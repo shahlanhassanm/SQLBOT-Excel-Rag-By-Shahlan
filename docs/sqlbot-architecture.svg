@@ -1,0 +1,240 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" role="img" aria-labelledby="title desc">
+  <title id="title">SQLBot Architecture Diagram</title>
+  <desc id="desc">End-to-end architecture showing clients, FastAPI backend, LLM/RAG pipeline, PostgreSQL metadata store, external data sources, MCP, and chart rendering.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2f5d7c" />
+    </marker>
+    <marker id="arrow-soft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#60758a" />
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#17324a" flood-opacity="0.12" />
+    </filter>
+    <style>
+      .canvas { fill: #f5f8fb; }
+      .title { font: 700 34px Arial, Helvetica, sans-serif; fill: #142b3d; }
+      .subtitle { font: 400 16px Arial, Helvetica, sans-serif; fill: #566b7b; }
+      .section { fill: #ffffff; stroke: #c9d7e3; stroke-width: 1.5; rx: 14; filter: url(#shadow); }
+      .section-title { font: 700 18px Arial, Helvetica, sans-serif; fill: #17324a; }
+      .section-note { font: 400 12px Arial, Helvetica, sans-serif; fill: #60758a; }
+      .box { stroke-width: 1.5; rx: 10; }
+      .client { fill: #e9f4ff; stroke: #65a8df; }
+      .api { fill: #edf8f3; stroke: #56aa80; }
+      .pipeline { fill: #fff6e6; stroke: #d59b43; }
+      .store { fill: #f0edff; stroke: #8d7bd1; }
+      .external { fill: #fff0f1; stroke: #d17079; }
+      .ops { fill: #eef2f5; stroke: #8295a5; }
+      .text { font: 400 13px Arial, Helvetica, sans-serif; fill: #203746; }
+      .box-title { font: 700 14px Arial, Helvetica, sans-serif; fill: #203746; }
+      .small { font: 400 11px Arial, Helvetica, sans-serif; fill: #526675; }
+      .tiny { font: 400 10px Arial, Helvetica, sans-serif; fill: #526675; }
+      .num { font: 700 13px Arial, Helvetica, sans-serif; fill: #ffffff; }
+      .flow { fill: none; stroke: #2f5d7c; stroke-width: 2.2; marker-end: url(#arrow); }
+      .soft-flow { fill: none; stroke: #60758a; stroke-width: 1.8; stroke-dasharray: 6 5; marker-end: url(#arrow-soft); }
+      .back-flow { fill: none; stroke: #60758a; stroke-width: 1.8; marker-end: url(#arrow-soft); }
+      .lane-label { font: 700 12px Arial, Helvetica, sans-serif; fill: #2f5d7c; }
+      .badge { fill: #2f5d7c; }
+      .divider { stroke: #d9e3ec; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect class="canvas" width="1600" height="1180" />
+  <text class="title" x="50" y="54">SQLBot full architecture</text>
+  <text class="subtitle" x="50" y="82">Conversational BI: natural language question -> RAG context -> LLM-generated SQL -> safe query execution -> chart, analysis, and streamed answer.</text>
+
+  <!-- Clients -->
+  <rect class="section" x="40" y="125" width="255" height="375" />
+  <text class="section-title" x="62" y="158">Clients and entry points</text>
+  <rect class="box client" x="62" y="185" width="210" height="70" />
+  <text class="box-title" x="82" y="211">Vue 3 web UI</text>
+  <text class="small" x="82" y="233">Hash router, Pinia, Element Plus</text>
+  <rect class="box client" x="62" y="275" width="210" height="70" />
+  <text class="box-title" x="82" y="301">Embedded assistant</text>
+  <text class="small" x="82" y="323">Assistant and embedded tokens</text>
+  <rect class="box client" x="62" y="365" width="210" height="70" />
+  <text class="box-title" x="82" y="391">MCP / external tools</text>
+  <text class="small" x="82" y="413">n8n, Dify, MaxKB, API clients</text>
+  <text class="section-note" x="62" y="470">Frontend sends JSON or SSE requests to /api/v1.</text>
+
+  <!-- FastAPI -->
+  <rect class="section" x="350" y="125" width="500" height="375" />
+  <text class="section-title" x="372" y="158">FastAPI backend on port 8000</text>
+  <text class="section-note" x="372" y="179">main.py creates app, runs migrations, initializes cache and embeddings.</text>
+  <rect class="box api" x="372" y="202" width="455" height="62" />
+  <text class="box-title" x="392" y="228">Middleware stack</text>
+  <text class="small" x="392" y="249">CORS, TokenMiddleware, response wrapper, request context</text>
+  <rect class="box api" x="372" y="284" width="210" height="82" />
+  <text class="box-title" x="392" y="310">System APIs</text>
+  <text class="small" x="392" y="331">login, users, workspace</text>
+  <text class="small" x="392" y="350">models, assistants, API keys</text>
+  <rect class="box api" x="617" y="284" width="210" height="82" />
+  <text class="box-title" x="637" y="310">Knowledge APIs</text>
+  <text class="small" x="637" y="331">datasources, tables, fields</text>
+  <text class="small" x="637" y="350">terms, SQL examples, prompts</text>
+  <rect class="box api" x="372" y="388" width="210" height="72" />
+  <text class="box-title" x="392" y="414">Chat APIs</text>
+  <text class="small" x="392" y="435">/chat/start, /chat/question</text>
+  <rect class="box api" x="617" y="388" width="210" height="72" />
+  <text class="box-title" x="637" y="414">Dashboard APIs</text>
+  <text class="small" x="637" y="435">resources, canvas, preview</text>
+
+  <!-- PostgreSQL -->
+  <rect class="section" x="905" y="125" width="300" height="375" />
+  <text class="section-title" x="927" y="158">PostgreSQL state store</text>
+  <text class="section-note" x="927" y="179">Alembic migrations manage schema.</text>
+  <rect class="box store" x="927" y="202" width="255" height="62" />
+  <text class="box-title" x="947" y="228">Identity and workspace</text>
+  <text class="small" x="947" y="249">users, workspace, auth, API keys</text>
+  <rect class="box store" x="927" y="282" width="255" height="72" />
+  <text class="box-title" x="947" y="308">Datasource catalog</text>
+  <text class="small" x="947" y="329">datasource config, tables, fields</text>
+  <text class="small" x="947" y="347">relations, permissions, embeddings</text>
+  <rect class="box store" x="927" y="372" width="255" height="72" />
+  <text class="box-title" x="947" y="398">Conversation memory</text>
+  <text class="small" x="947" y="419">chat, chat_record, chat_log</text>
+  <text class="small" x="947" y="437">SQL, data, chart JSON, token use</text>
+  <text class="section-note" x="927" y="470">Excel uploads are imported as PostgreSQL tables.</text>
+
+  <!-- External services -->
+  <rect class="section" x="1260" y="125" width="300" height="375" />
+  <text class="section-title" x="1282" y="158">External services</text>
+  <rect class="box external" x="1282" y="190" width="255" height="76" />
+  <text class="box-title" x="1302" y="216">LLM providers</text>
+  <text class="small" x="1302" y="237">OpenAI-compatible, Azure, vLLM</text>
+  <text class="small" x="1302" y="255">DeepSeek, Gemini, MiniMax, etc.</text>
+  <rect class="box external" x="1282" y="286" width="255" height="82" />
+  <text class="box-title" x="1302" y="312">Business data sources</text>
+  <text class="small" x="1302" y="333">MySQL, PostgreSQL, SQL Server</text>
+  <text class="small" x="1302" y="351">Oracle, ClickHouse, Hive, ES...</text>
+  <rect class="box external" x="1282" y="388" width="255" height="72" />
+  <text class="box-title" x="1302" y="414">Chart image service</text>
+  <text class="small" x="1302" y="435">Node g2-ssr on port 3000</text>
+
+  <!-- Chat pipeline -->
+  <rect class="section" x="40" y="560" width="1520" height="430" />
+  <text class="section-title" x="62" y="593">Question processing pipeline inside LLMService</text>
+  <text class="section-note" x="62" y="614">This is the core path used by the web UI, embedded assistant, and MCP question APIs.</text>
+
+  <g transform="translate(72 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">1</text>
+    <text class="box-title" x="48" y="25">Receive question</text>
+    <text class="small" x="20" y="51">Create ChatRecord</text>
+    <text class="small" x="20" y="70">Return SSE id chunk</text>
+  </g>
+  <g transform="translate(252 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">2</text>
+    <text class="box-title" x="48" y="25">Choose datasource</text>
+    <text class="small" x="20" y="51">Existing chat DS or</text>
+    <text class="small" x="20" y="70">LLM/embedding match</text>
+  </g>
+  <g transform="translate(432 654)">
+    <rect class="box pipeline" x="0" y="0" width="170" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">3</text>
+    <text class="box-title" x="48" y="25">Build RAG context</text>
+    <text class="small" x="20" y="51">schema, sample rows</text>
+    <text class="small" x="20" y="70">terms, examples, prompts</text>
+  </g>
+  <g transform="translate(622 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">4</text>
+    <text class="box-title" x="48" y="25">Generate SQL</text>
+    <text class="small" x="20" y="51">Prompt LLM via</text>
+    <text class="small" x="20" y="70">LLMFactory</text>
+  </g>
+  <g transform="translate(802 654)">
+    <rect class="box pipeline" x="0" y="0" width="170" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">5</text>
+    <text class="box-title" x="48" y="25">Validate and guard</text>
+    <text class="small" x="20" y="51">Parse JSON, read-only SQL</text>
+    <text class="small" x="20" y="70">apply row permissions</text>
+  </g>
+  <g transform="translate(992 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">6</text>
+    <text class="box-title" x="48" y="25">Execute SQL</text>
+    <text class="small" x="20" y="51">Connect to selected</text>
+    <text class="small" x="20" y="70">business datasource</text>
+  </g>
+  <g transform="translate(1172 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">7</text>
+    <text class="box-title" x="48" y="25">Generate chart</text>
+    <text class="small" x="20" y="51">LLM outputs chart JSON</text>
+    <text class="small" x="20" y="70">or analysis/predict text</text>
+  </g>
+  <g transform="translate(1352 654)">
+    <rect class="box pipeline" x="0" y="0" width="160" height="94" />
+    <circle class="badge" cx="24" cy="24" r="14" />
+    <text class="num" x="20" y="29">8</text>
+    <text class="box-title" x="48" y="25">Stream and save</text>
+    <text class="small" x="20" y="51">SSE chunks to UI</text>
+    <text class="small" x="20" y="70">Persist record and logs</text>
+  </g>
+
+  <path class="flow" d="M232 701 L252 701" />
+  <path class="flow" d="M412 701 L432 701" />
+  <path class="flow" d="M602 701 L622 701" />
+  <path class="flow" d="M782 701 L802 701" />
+  <path class="flow" d="M972 701 L992 701" />
+  <path class="flow" d="M1152 701 L1172 701" />
+  <path class="flow" d="M1332 701 L1352 701" />
+
+  <rect class="box store" x="220" y="825" width="255" height="92" />
+  <text class="box-title" x="242" y="852">RAG source records</text>
+  <text class="small" x="242" y="873">core_table/core_field embeddings</text>
+  <text class="small" x="242" y="892">terminology and SQL examples</text>
+
+  <rect class="box external" x="610" y="825" width="260" height="92" />
+  <text class="box-title" x="632" y="852">Model runtime</text>
+  <text class="small" x="632" y="873">LangChain chat model stream</text>
+  <text class="small" x="632" y="892">local or external embeddings</text>
+
+  <rect class="box external" x="1000" y="825" width="255" height="92" />
+  <text class="box-title" x="1022" y="852">Datasource execution</text>
+  <text class="small" x="1022" y="873">SQLAlchemy or native drivers</text>
+  <text class="small" x="1022" y="892">read-only validation via sqlglot</text>
+
+  <rect class="box store" x="1320" y="825" width="190" height="92" />
+  <text class="box-title" x="1342" y="852">Saved outputs</text>
+  <text class="small" x="1342" y="873">SQL, data, chart JSON</text>
+  <text class="small" x="1342" y="892">logs, errors, usage</text>
+
+  <!-- Cross-section arrows -->
+  <path class="flow" d="M272 220 C312 220 315 220 350 220" />
+  <text class="lane-label" x="304" y="207">HTTP</text>
+  <path class="flow" d="M272 400 C315 400 315 425 350 425" />
+  <text class="lane-label" x="302" y="384">SSE / API</text>
+
+  <path class="back-flow" d="M850 330 C878 330 878 330 905 330" />
+  <path class="back-flow" d="M905 420 C878 420 878 430 850 430" />
+  <text class="lane-label" x="856" y="316">read/write metadata</text>
+
+  <path class="flow" d="M782 654 C905 575 1145 548 1282 224" />
+  <text class="lane-label" x="1005" y="566">LLM prompts and streams</text>
+  <path class="flow" d="M1152 701 C1220 695 1235 330 1282 330" />
+  <text class="lane-label" x="1216" y="518">query</text>
+  <path class="soft-flow" d="M1332 748 C1380 778 1400 785 1410 825" />
+  <path class="soft-flow" d="M1172 748 C1218 780 1260 409 1282 424" />
+  <text class="lane-label" x="1240" y="768">optional MCP image</text>
+
+  <path class="soft-flow" d="M517 748 C480 784 420 792 348 825" />
+  <path class="soft-flow" d="M702 748 C700 782 718 793 740 825" />
+  <path class="soft-flow" d="M1080 748 C1080 785 1100 800 1128 825" />
+
+  <!-- MCP sidecar -->
+  <rect class="section" x="40" y="1025" width="1520" height="105" />
+  <text class="section-title" x="62" y="1058">Container startup and ports</text>
+  <line class="divider" x1="62" y1="1074" x2="1534" y2="1074" />
+  <text class="text" x="62" y="1102">start.sh launches PostgreSQL, Node g2-ssr on :3000, MCP FastAPI app on :8001, and the main FastAPI app on :8000.</text>
+  <text class="small" x="62" y="1125">The main app also exposes OpenAPI docs, mounts a FastApiMCP server onto the MCP app, and lets sqlbot-xpack attach static UI / enterprise extensions.</text>
+</svg>

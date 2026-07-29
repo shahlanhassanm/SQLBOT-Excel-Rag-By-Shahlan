@@ -1,0 +1,66 @@
+services:
+  sqlbot:
+    image: sqlbot:local
+    build:
+      context: .
+      dockerfile: Dockerfile.overlay
+    container_name: sqlbot
+    restart: always
+    privileged: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - sqlbot-network
+    ports:
+      - 8000:8000
+      - 8001:8001
+    environment:
+      # Database configuration
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: sqlbot
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: Password123@pg
+      # Project basic settings
+      PROJECT_NAME: "SQLBot"
+      DEFAULT_PWD: "SQLBot@123456"
+      # MCP settings
+      SERVER_IMAGE_HOST: http://YOUR_SERVE_IP:MCP_PORT/images/
+      # Auth & Security
+      SECRET_KEY: y5txe1mRmS_JpOrUzFzHEu-kIQn3lf7ll0AOv9DQh0s
+      # CORS settings
+      BACKEND_CORS_ORIGINS: "http://localhost,http://localhost:5173,https://localhost,https://localhost:5173"
+      # Logging
+      LOG_LEVEL: "INFO"
+      SQL_DEBUG: False
+      # External embedding model (Ollama on the host). Empty values would fall
+      # back to the bundled shibing624/text2vec-base-chinese local model.
+      EMBEDDING_API_BASE: "http://host.docker.internal:11434/v1"
+      EMBEDDING_API_MODEL: "mxbai-embed-large"
+      EMBEDDING_API_KEY: "ollama"
+      # Per-row vector RAG fallback (semantic row retrieval when SQL/finder fails)
+      ROW_RAG_ENABLED: "true"
+      # Table sampling adapts to each table's shape (see config.py). Defaults are
+      # left in place; raise PROBE_ROWS if a file's category values sit deeper
+      # than the first 50 rows, or CHAR_BUDGET to show more raw rows per table.
+      TABLE_SAMPLE_PROBE_ROWS: "50"
+      TABLE_SAMPLE_CHAR_BUDGET: "3000"
+      # APEX-SQL refinement (logical plan + schema prune + data profiling probes) is
+      # the single biggest latency cost per question (5-6 extra sequential LLM calls).
+      # Disabled here to cut answer time drastically on the local GPU.
+      APEX_ENABLED: "false"
+      # Second parallel SQL candidate on retries (self-consistency). Kept ON so
+      # APEX is the only refinement stage that is disabled.
+      AGENTIC_MULTI_CANDIDATE_ENABLED: "true"
+      # Multi-datasource question splitting. Kept ON so questions can span multiple
+      # Excel files at once (costs ~1+ extra LLM call/question on cross-file queries).
+      AGENTIC_DECOMPOSE_ENABLED: "true"
+    volumes:
+      - ./data/sqlbot/excel:/opt/sqlbot/data/excel
+      - ./data/sqlbot/file:/opt/sqlbot/data/file
+      - ./data/sqlbot/images:/opt/sqlbot/images
+      - ./data/sqlbot/logs:/opt/sqlbot/app/logs
+      - ./data/postgresql:/var/lib/postgresql/data
+
+networks:
+  sqlbot-network:

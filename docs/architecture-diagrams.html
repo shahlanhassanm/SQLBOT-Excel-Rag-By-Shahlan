@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SQLBot — Architecture: Before vs After Agentic Update</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; background: #f8fafc; margin: 0; padding: 32px; color: #0f172a; }
+  h1 { text-align: center; font-size: 26px; margin-bottom: 4px; }
+  p.sub { text-align: center; color: #64748b; margin-top: 0; }
+  .diagram { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.06);
+             margin: 28px auto; padding: 16px; max-width: 1280px; overflow-x: auto; }
+  .diagram img { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .caption { text-align: center; font-size: 14px; color: #475569; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h1>SQLBot Architecture — Before vs After the Agentic Update</h1>
+  <p class="sub">Diagram 1: current linear pipeline &nbsp;·&nbsp; Diagram 2: proposed 5-node LangGraph agent loop</p>
+
+  <div class="diagram">
+    <img src="architecture-1-current.svg" alt="Current SQLBot architecture — linear one-shot pipeline">
+    <div class="caption"><b>BEFORE:</b> one-shot datasource pick (llm.py:584) → single SQL attempt → no verification. Red boxes mark the failure modes at 100-document scale.</div>
+  </div>
+
+  <div class="diagram">
+    <img src="architecture-2-agentic.svg" alt="Proposed agentic SQLBot architecture — LangGraph agent loop">
+    <div class="caption"><b>AFTER:</b> Finder (hybrid, top-3) → Decomposer → multi-candidate SQL → Executor+Grader with retry/fallback loops → Synthesizer with citations. Green boxes show what each piece fixes.</div>
+  </div>
+</body>
+</html>
