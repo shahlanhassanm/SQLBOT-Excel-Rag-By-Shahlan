@@ -87,8 +87,8 @@ works equally well — see [Connecting a model](#connecting-a-model).
 ### 1. Clone and start
 
 ```bash
-git clone http://10.100.100.102:3000/instagpu/SQL-Bot---Excel-RAG.git
-cd SQL-Bot---Excel-RAG
+git clone https://github.com/shahlanhassanm/SQLBOT-Excel-Rag-.git
+cd SQLBOT-Excel-Rag-
 docker compose up -d --build
 ```
 
