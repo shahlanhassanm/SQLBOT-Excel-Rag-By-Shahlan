@@ -1043,6 +1043,30 @@ class LLMService:
             traceback.print_exc()
             return None
 
+    def _has_row_restrictions(self, _session: Session) -> bool:
+        """True when row-level rules actually apply to this caller.
+
+        Used to gate cross-datasource fanout, whose secondary legs bypass the
+        permission rewrite. Fails CLOSED: any lookup problem reports "restricted"
+        so an error can only ever disable fanout, never enable it for a user
+        whose rows are filtered (AUDIT D-05 option 1).
+        """
+        try:
+            if not isinstance(self.ds, CoreDatasource):
+                return True
+            if not is_normal_user(self.current_user):
+                return False  # bypasses row rules entirely
+            from apps.datasource.crud.table import get_readable_table_names
+            _tables = get_readable_table_names(_session, self.ds.oid, self.ds.id)
+            if not _tables:
+                return False
+            return bool(get_row_permission_filters(
+                session=_session, current_user=self.current_user,
+                ds=self.ds, tables=_tables))
+        except Exception:
+            traceback.print_exc()
+            return True
+
     def decompose_question(self, _session: Session) -> dict:
         """Detect multi-datasource questions and route them. Returns
         ``{'mode': 'single'|'fanout'|'split', 'subs': [...]}``.
@@ -1058,7 +1082,18 @@ class LLMService:
             return single
         if self.current_assistant:
             return single
-        if is_normal_user(self.current_user):
+        # Secondary legs bypass the row-permission rewrite (_run_secondary_leg
+        # never calls generate_filter), so fanout is unsafe for a user whose
+        # rows are restricted. This used to be approximated as
+        # `is_normal_user(...)` -- i.e. "is not user id 1" -- which disabled the
+        # whole documented multi-file feature for every real account, not just
+        # restricted ones (AUDIT D-05 option 1 / D-12).
+        #
+        # Gate on whether row filters ACTUALLY apply to this caller instead.
+        # Deliberately conservative: any row rule anywhere in the datasource
+        # blocks fanout, and a lookup failure blocks it too, so this can only
+        # ever be more restrictive than the permission rewrite it stands in for.
+        if self._has_row_restrictions(_session):
             return single
         try:
             valid_ids = {c.get('id') for c in self._ranked_candidates if isinstance(c.get('id'), int)}
