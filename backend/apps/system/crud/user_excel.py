@@ -1,7 +1,11 @@
 
 
 import asyncio
-from http.client import HTTPException
+# fastapi.HTTPException, NOT http.client.HTTPException: the latter is a plain
+# Exception subclass that ignores the status argument, so every guard below fell
+# through to the global handler and returned 500 instead of its intended 4xx --
+# including the three 403 "Unauthorized file access" checks (AUDIT D-07).
+from fastapi import HTTPException
 import io
 import sys
 import tempfile
@@ -87,7 +91,7 @@ async def downTemplate(trans):
 async def batchUpload(session: SessionDep, trans, file) -> UploadResultDTO:
     ALLOWED_EXTENSIONS = {"xlsx", "xls"}
     if not file.filename.lower().endswith(tuple(ALLOWED_EXTENSIONS)):
-        raise HTTPException(400, "Only support .xlsx/.xls")
+        raise HTTPException(status_code=400, detail="Only support .xlsx/.xls")
     
     # Support FastAPI UploadFile (async read) and file-like objects.
     NA_VALUES = ['', 'NA', 'N/A', 'NULL']
@@ -115,7 +119,7 @@ async def batchUpload(session: SessionDep, trans, file) -> UploadResultDTO:
     head_list = list(df.columns)
     i18n_head_list = get_i18n_head_list()
     if not validate_head(trans=trans, head_i18n_list=i18n_head_list, head_list=head_list):
-        raise HTTPException(400, "Excel header validation failed")
+        raise HTTPException(status_code=400, detail="Excel header validation failed")
     success_list = []
     error_list = []
     for row in df.itertuples():
@@ -245,26 +249,26 @@ def download_error_file(file_id: str) -> FileResponse:
     created by `generate_error_file` are allowed.
     """
     if not file_id:
-        raise HTTPException(400, "file_id required")
+        raise HTTPException(status_code=400, detail="file_id required")
 
     with _TEMP_FILE_LOCK:
         file_path = _TEMP_FILE_MAP.get(file_id)
 
     if not file_path:
-        raise HTTPException(404, "File not found")
+        raise HTTPException(status_code=404, detail="File not found")
 
     # ensure file is inside tempdir
     tempdir = tempfile.gettempdir()
     try:
         common = os.path.commonpath([tempdir, os.path.abspath(file_path)])
     except Exception:
-        raise HTTPException(403, "Unauthorized file access")
+        raise HTTPException(status_code=403, detail="Unauthorized file access")
 
     if os.path.abspath(common) != os.path.abspath(tempdir):
-        raise HTTPException(403, "Unauthorized file access")
+        raise HTTPException(status_code=403, detail="Unauthorized file access")
 
     if not os.path.exists(file_path):
-        raise HTTPException(404, "File not found")
+        raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(
         path=file_path,
