@@ -22,6 +22,9 @@ from common.utils.utils import extract_nested_json, SQLBotLogUtil
 
 
 def get_chat_record_by_id(session: SessionDep, record_id: int):
+    """Unscoped lookup. Callers inside this module are already scoped by their
+    own entry point; HTTP-facing callers must use
+    ``get_chat_record_by_id_with_user`` instead."""
     record: ChatRecord | None = None
 
     stmt = select(ChatRecord.id, ChatRecord.question, ChatRecord.chat_id, ChatRecord.datasource, ChatRecord.engine_type,
@@ -31,6 +34,46 @@ def get_chat_record_by_id(session: SessionDep, record_id: int):
     for r in result:
         record = ChatRecord(id=r.id, question=r.question, chat_id=r.chat_id, datasource=r.datasource,
                             engine_type=r.engine_type, ai_modal_id=r.ai_modal_id, create_by=r.create_by)
+    return record
+
+
+def get_chat_record_by_id_with_user(session: SessionDep, current_user: CurrentUser,
+                                    record_id: int) -> Optional[ChatRecord]:
+    """Owner-scoped variant of ``get_chat_record_by_id``.
+
+    A record belonging to another user is indistinguishable from a missing one,
+    matching ``get_chart_data_with_user`` and the other ``*_with_user`` readers.
+    """
+    record: ChatRecord | None = None
+
+    stmt = select(ChatRecord.id, ChatRecord.question, ChatRecord.chat_id, ChatRecord.datasource, ChatRecord.engine_type,
+                  ChatRecord.ai_modal_id, ChatRecord.create_by).where(
+        and_(ChatRecord.id == record_id, ChatRecord.create_by == current_user.id))
+    result = session.execute(stmt)
+    for r in result:
+        record = ChatRecord(id=r.id, question=r.question, chat_id=r.chat_id, datasource=r.datasource,
+                            engine_type=r.engine_type, ai_modal_id=r.ai_modal_id, create_by=r.create_by)
+    return record
+
+
+def get_analysis_base_record_with_user(session: SessionDep, current_user: CurrentUser,
+                                       chat_record_id: int) -> Optional[ChatRecord]:
+    """Load the record an /analysis or /predict request is based on, owner-scoped.
+
+    Carries the extra columns those two actions consume (``chart`` and ``data``)
+    on top of the identity columns.
+    """
+    record: ChatRecord | None = None
+
+    stmt = select(ChatRecord.id, ChatRecord.question, ChatRecord.chat_id, ChatRecord.datasource,
+                  ChatRecord.engine_type, ChatRecord.ai_modal_id, ChatRecord.create_by,
+                  ChatRecord.chart, ChatRecord.data).where(
+        and_(ChatRecord.id == chat_record_id, ChatRecord.create_by == current_user.id))
+    result = session.execute(stmt)
+    for r in result:
+        record = ChatRecord(id=r.id, question=r.question, chat_id=r.chat_id, datasource=r.datasource,
+                            engine_type=r.engine_type, ai_modal_id=r.ai_modal_id, create_by=r.create_by,
+                            chart=r.chart, data=r.data)
     return record
 
 

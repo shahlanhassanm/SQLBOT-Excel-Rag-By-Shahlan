@@ -12,7 +12,8 @@ from starlette.responses import JSONResponse
 
 from apps.chat.curd.chat import delete_chat_with_user, get_chart_data_with_user, get_chat_predict_data_with_user, \
     list_chats, get_chat_with_records, create_chat, rename_chat, \
-    delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, get_chat_record_by_id, \
+    delete_chat, get_chat_chart_data, get_chat_predict_data, get_chat_with_records_with_data, \
+    get_chat_record_by_id_with_user, get_analysis_base_record_with_user, \
     format_json_data, format_json_list_data, get_chart_config, list_recent_questions, get_chat as get_chat_exec, \
     rename_chat_with_user, get_chat_log_history, get_chart_data_with_user_live
 from apps.chat.models.chat_model import CreateChat, ChatRecord, RenameChat, ChatQuestion, AxisObj, QuickCommand, \
@@ -229,7 +230,9 @@ async def ask_recommend_questions(session: SessionDep, current_user: CurrentUser
         yield 'data:' + orjson.dumps({'content': '[]', 'type': 'recommended_question'}).decode() + '\n\n'
 
     try:
-        record = get_chat_record_by_id(session, chat_record_id)
+        # Owner-scoped: another user's record must not leak its question text or
+        # seed recommendations from their datasource (AUDIT D-04).
+        record = get_chat_record_by_id_with_user(session, current_user, chat_record_id)
 
         if not record:
             return StreamingResponse(_return_empty(), media_type="text/event-stream")
@@ -425,18 +428,10 @@ async def analysis_or_predict(session: SessionDep, current_user: CurrentUser, ch
     try:
         if action_type != 'analysis' and action_type != 'predict':
             raise Exception(f"Type {action_type} Not Found")
-        record: ChatRecord | None = None
-
-        stmt = select(ChatRecord.id, ChatRecord.question, ChatRecord.chat_id, ChatRecord.datasource,
-                      ChatRecord.engine_type,
-                      ChatRecord.ai_modal_id, ChatRecord.create_by, ChatRecord.chart, ChatRecord.data).where(
-            and_(ChatRecord.id == chat_record_id))
-        result = session.execute(stmt)
-        for r in result:
-            record = ChatRecord(id=r.id, question=r.question, chat_id=r.chat_id, datasource=r.datasource,
-                                engine_type=r.engine_type, ai_modal_id=r.ai_modal_id, create_by=r.create_by,
-                                chart=r.chart,
-                                data=r.data)
+        # Owner-scoped: a record belonging to another user must be
+        # indistinguishable from a missing one (AUDIT D-03).
+        record: ChatRecord | None = get_analysis_base_record_with_user(
+            session=session, current_user=current_user, chat_record_id=chat_record_id)
 
         if not record:
             raise Exception(f"Chat record with id {chat_record_id} not found")
