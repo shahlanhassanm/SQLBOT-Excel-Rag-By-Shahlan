@@ -8,7 +8,6 @@ import re
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlmodel import Session, select
 from apps.chat.models.chat_model import Chat
-from apps.datasource.crud.datasource import get_ws_ds
 from apps.datasource.models.datasource import CoreDatasource
 from common.core.db import engine
 from apps.system.schemas.system_schema import UserInfoDTO
@@ -22,6 +21,13 @@ class SqlbotPermission(BaseModel):
     keyExpression: Optional[str] = None
 
 async def get_ws_resource(oid, type) -> list:
+    # Deferred: apps.datasource.crud.datasource imports back into this module
+    # (via sqlbot_xpack.permissions -> apps.system.api.user), so a module-level
+    # import makes whichever of the two is imported first fail with a partially
+    # initialized module. Same pattern already used in llm.py, value_index.py and
+    # crud/datasource.py for the same reason. See AUDIT D-36.
+    from apps.datasource.crud.datasource import get_ws_ds
+
     with Session(engine) as session:
         stmt = None
         if type == 'ds' or type == 'datasource':
