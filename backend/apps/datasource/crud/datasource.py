@@ -7,6 +7,7 @@ from sqlalchemy import and_, text
 from sqlbot_xpack.permissions.models.ds_rules import DsRules
 from sqlmodel import select
 
+from apps.chat.task.apex_helpers import quote_ident
 from apps.datasource.crud.permission import collect_row_filters, get_column_permission_fields, \
     get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.table_embedding import calc_table_embedding
@@ -346,44 +347,52 @@ def preview(session: SessionDep, current_user: CurrentUser, id: int, data: Table
         return {"fields": [], "data": [], "sql": ''}
 
     conf = DatasourceConf(**json.loads(aes_decrypt(ds.configuration))) if ds.type != "excel" else get_engine_config()
+
+    # Identifiers are quoted through quote_ident, which produces the SAME quote
+    # characters as DB.prefix/DB.suffix for all 14 dialects (verified exhaustively)
+    # but ALSO escapes an embedded quote character. Field names originate from
+    # spreadsheet headers, which region_columns does not sanitise, so a header
+    # containing a quote used to break out of the identifier (AUDIT D-08).
+    _ds_type = ds.type
+    _cols = ", ".join(quote_ident(f, _ds_type) for f in fields)
+    _tbl = quote_ident(data.table.table_name, _ds_type)
+    _qualified = f"{quote_ident(conf.dbSchema, _ds_type)}.{_tbl}"
+    _first = quote_ident(fields[0], _ds_type)
+
     sql: str = ""
     if ds.type == "mysql" or ds.type == "doris" or ds.type == "starrocks" or ds.type == "hive":
-        sql = f"""SELECT `{"`, `".join(fields)}` FROM `{data.table.table_name}` 
-            {where} 
+        sql = f"""SELECT {_cols} FROM {_tbl}
+            {where}
             LIMIT 100"""
     elif ds.type == "sqlServer":
-        sql = f"""SELECT TOP 100 [{"], [".join(fields)}] FROM [{conf.dbSchema}].[{data.table.table_name}]
-            {where} 
+        sql = f"""SELECT TOP 100 {_cols} FROM {_qualified}
+            {where}
             """
     elif ds.type == "pg" or ds.type == "excel" or ds.type == "redshift" or ds.type == "kingbase":
-        sql = f"""SELECT "{'", "'.join(fields)}" FROM "{conf.dbSchema}"."{data.table.table_name}" 
-            {where} 
+        sql = f"""SELECT {_cols} FROM {_qualified}
+            {where}
             LIMIT 100"""
     elif ds.type == "oracle":
-        # sql = f"""SELECT "{'", "'.join(fields)}" FROM "{conf.dbSchema}"."{data.table.table_name}"
-        #     {where}
-        #     ORDER BY "{fields[0]}"
-        #     OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"""
         sql = f"""SELECT * FROM
-                    (SELECT "{'", "'.join(fields)}" FROM "{conf.dbSchema}"."{data.table.table_name}"
-                    {where} 
-                    ORDER BY "{fields[0]}")
+                    (SELECT {_cols} FROM {_qualified}
+                    {where}
+                    ORDER BY {_first})
                     WHERE ROWNUM <= 100
                     """
     elif ds.type == "ck":
-        sql = f"""SELECT "{'", "'.join(fields)}" FROM "{data.table.table_name}" 
-            {where} 
+        sql = f"""SELECT {_cols} FROM {_tbl}
+            {where}
             LIMIT 100"""
     elif ds.type == "dm":
-        sql = f"""SELECT "{'", "'.join(fields)}" FROM "{conf.dbSchema}"."{data.table.table_name}"
+        sql = f"""SELECT {_cols} FROM {_qualified}
             {where}
             LIMIT 100"""
     elif ds.type == "es":
-        sql = f"""SELECT "{'", "'.join(fields)}" FROM "{data.table.table_name}"
+        sql = f"""SELECT {_cols} FROM {_tbl}
             {where}
             LIMIT 100"""
     elif ds.type == "sqlite":
-        sql = f"""SELECT "{'", "'.join(fields)}" FROM "{data.table.table_name}"
+        sql = f"""SELECT {_cols} FROM {_tbl}
             {where}
             LIMIT 100"""
     return exec_sql(ds, sql, True)
@@ -400,8 +409,10 @@ def fieldEnum(session: SessionDep, id: int):
     if ds is None:
         return []
 
-    db = DB.get_db(ds.type)
-    sql = f"""SELECT DISTINCT {db.prefix}{field.field_name}{db.suffix} FROM {db.prefix}{table.table_name}{db.suffix}"""
+    # quote_ident rather than DB.prefix/suffix so an embedded quote in a
+    # spreadsheet-derived column name is escaped, not honoured (AUDIT D-08).
+    sql = (f"SELECT DISTINCT {quote_ident(field.field_name, ds.type)} "
+           f"FROM {quote_ident(table.table_name, ds.type)}")
     res = exec_sql(ds, sql, True)
     return [item.get(res.get('fields')[0]) for item in res.get('data')]
 
@@ -522,14 +533,16 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list,
     budget = settings.TABLE_SAMPLE_CHAR_BUDGET
     value_maxlen = settings.TABLE_SAMPLE_VALUE_MAXLEN
 
-    db = DB.get_db(ds.type)
-    # Get prefix/suffix for identifier quoting
-    prefix = db.prefix if hasattr(db, 'prefix') else '"'
-    suffix = db.suffix if hasattr(db, 'suffix') else '"'
-
     # Every column is selected; width is bounded by the character budget below
     # rather than by a column cap, which used to hide trailing total columns.
-    field_names = [f"{prefix}{field.field_name}{suffix}" for field in fields]
+    #
+    # quote_ident escapes an embedded quote character; the previous
+    # f"{prefix}{name}{suffix}" did not, and this function runs on EVERY chat
+    # question, so a spreadsheet header containing a quote injected into every
+    # user's sample query (AUDIT D-08). quote_ident emits the same quote
+    # characters as DB.prefix/DB.suffix for all 14 dialects.
+    field_names = [quote_ident(field.field_name, ds.type) for field in fields]
+    quoted_table = quote_ident(table_name, ds.type)
 
     # Row-level permission predicate (AUDIT D-02). These rows go verbatim into
     # the model prompt and the UI execution log, so a restricted user must not
@@ -543,19 +556,19 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list,
     # Build LIMIT query based on database type
     if equals_ignore_case(ds.type, "sqlServer"):
         query = (f"SELECT TOP {probe_rows} {','.join(field_names)} "
-                 f"FROM {prefix}{table_name}{suffix}{_where}")
+                 f"FROM {quoted_table}{_where}")
     elif equals_ignore_case(ds.type, "ck"):
-        query = f"SELECT {','.join(field_names)} FROM {table_name}{_where} LIMIT {probe_rows}"
+        query = f"SELECT {','.join(field_names)} FROM {quoted_table}{_where} LIMIT {probe_rows}"
     elif equals_ignore_case(ds.type, "hive"):
-        query = f"SELECT {','.join(field_names)} FROM {table_name}{_where} LIMIT {probe_rows}"
+        query = f"SELECT {','.join(field_names)} FROM {quoted_table}{_where} LIMIT {probe_rows}"
     elif equals_ignore_case(ds.type, "oracle"):
-        query = (f"SELECT {','.join(field_names)} FROM \"{table_name}\" "
+        query = (f"SELECT {','.join(field_names)} FROM {quoted_table} "
                  f"WHERE ROWNUM <= {probe_rows}{_and}")
     elif equals_ignore_case(ds.type, "dm"):
-        query = (f"SELECT {','.join(field_names)} FROM \"{table_name}\" "
+        query = (f"SELECT {','.join(field_names)} FROM {quoted_table} "
                  f"WHERE ROWNUM <= {probe_rows}{_and}")
     else:
-        query = (f"SELECT {','.join(field_names)} FROM {prefix}{table_name}{suffix}"
+        query = (f"SELECT {','.join(field_names)} FROM {quoted_table}"
                  f"{_where} LIMIT {probe_rows}")
 
     try:
