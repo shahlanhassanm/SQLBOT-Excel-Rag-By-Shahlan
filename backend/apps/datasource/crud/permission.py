@@ -73,6 +73,26 @@ def get_column_permission_fields(session: SessionDep, current_user: CurrentUser,
     return fields
 
 
+def collect_row_filters(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource,
+                        tables: list[str] | None = None) -> dict[str, str]:
+    """``{table_name: where_fragment}`` for the caller's row-level rules.
+
+    Thin adapter over ``get_row_permission_filters`` (which returns a list of
+    ``{'table', 'filter'}``) for the read paths that need to look a filter up by
+    table name: table sampling and value linking (AUDIT D-02). Returns ``{}``
+    for users who bypass row rules, exactly as the list form does.
+    """
+    filters = get_row_permission_filters(session=session, current_user=current_user,
+                                         ds=ds, tables=tables)
+    out: dict[str, str] = {}
+    for item in filters or []:
+        table = item.get('table')
+        where = item.get('filter')
+        if table and where and str(where).strip():
+            out[table] = where
+    return out
+
+
 def is_normal_user(current_user: CurrentUser):
     return current_user.id != 1
 

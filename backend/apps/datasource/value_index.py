@@ -19,6 +19,7 @@ Cost discipline, because this runs inside the question path:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -68,6 +69,21 @@ def clear_cache() -> None:
         _CACHE.clear()
 
 
+def _filter_key(table: str, row_filter: str | None) -> str:
+    """Cache-key component that folds the row-permission predicate into the
+    table identity.
+
+    Without this, the first (say, unrestricted) caller populates the cache and
+    every later restricted caller is served that privileged value set for
+    VALUE_LINKING_CACHE_TTL seconds — the cache would re-open exactly the hole
+    the filter closes. See AUDIT D-02 and D-13.
+    """
+    if not row_filter or not str(row_filter).strip():
+        return table
+    digest = hashlib.sha256(str(row_filter).encode('utf-8', 'replace')).hexdigest()[:16]
+    return f'{table}\x1f{digest}'
+
+
 # Row limiting is not portable. Without this the probe SQL is simply invalid on
 # Oracle/SQL Server, and since probe failures are swallowed, value linking would
 # no-op across whole dialects with no visible symptom.
@@ -75,11 +91,21 @@ _FETCH_FIRST_TYPES = frozenset({'oracle', 'dm', 'kingbase'})
 _TOP_TYPES = frozenset({'sqlserver', 'mssql'})
 
 
-def build_distinct_sql(ds_type: Optional[str], table_ref: str, column_ref: str, limit: int) -> str:
-    """Dialect-correct ``SELECT DISTINCT <col> ... <row limit>``."""
+def build_distinct_sql(ds_type: str | None, table_ref: str, column_ref: str, limit: int,
+                       row_filter: str | None = None) -> str:
+    """Dialect-correct ``SELECT DISTINCT <col> ... <row limit>``.
+
+    ``row_filter`` is the caller's row-level permission WHERE fragment. It is
+    ANDed into the predicate so a restricted user's value hints only ever
+    contain cell values from rows they are allowed to see (AUDIT D-02). The
+    fragment is produced server-side by ``transFilterTree`` from admin-configured
+    rules, the same source ``preview()`` already interpolates.
+    """
     normalized = str(ds_type or '').strip().lower()
     count = int(limit)
     where = f'WHERE {column_ref} IS NOT NULL'
+    if row_filter and str(row_filter).strip():
+        where += f' AND ({row_filter})'
     if normalized in _TOP_TYPES:
         return f'SELECT DISTINCT TOP {count} {column_ref} FROM {table_ref} {where}'
     if normalized in _FETCH_FIRST_TYPES:
@@ -88,17 +114,20 @@ def build_distinct_sql(ds_type: Optional[str], table_ref: str, column_ref: str, 
     return f'SELECT DISTINCT {column_ref} FROM {table_ref} {where} LIMIT {count}'
 
 
-def fetch_distinct_values(ds, table: str, column: str, limit: int, exec_fn) -> List[str]:
+def fetch_distinct_values(ds, table: str, column: str, limit: int, exec_fn,
+                          row_filter: str | None = None) -> List[str]:
     """Distinct non-null values of one column, capped at ``limit``.
 
     ``exec_fn(ds, sql)`` is injected so this is testable without a database; it
     must return ``{'fields': [...], 'data': [{col: value}, ...]}`` like
     apps.db.db.exec_sql.
+
+    ``row_filter`` carries the caller's row-level permission predicate (D-02).
     """
     ds_type = getattr(ds, 'type', None)
     table_ref = quoted_table_ref(ds_type, '', table)
     column_ref = quote_ident(column, ds_type)
-    sql = build_distinct_sql(ds_type, table_ref, column_ref, limit)
+    sql = build_distinct_sql(ds_type, table_ref, column_ref, limit, row_filter)
     result = exec_fn(ds, sql)
     rows = (result or {}).get('data') or []
     values: List[str] = []
@@ -118,11 +147,18 @@ def fetch_distinct_values(ds, table: str, column: str, limit: int, exec_fn) -> L
     return values
 
 
-def collect_column_values(ds, tables: Sequence[Dict[str, Any]], exec_fn) -> Dict[Tuple[str, str], List[str]]:
+def collect_column_values(ds, tables: Sequence[Dict[str, Any]], exec_fn,
+                          row_filters: dict[str, str] | None = None
+                          ) -> Dict[Tuple[str, str], List[str]]:
     """Probe the most promising text columns and return ``{(table, col): values}``.
 
     ``tables`` is ``[{'table_name': str, 'fields': [{'name','type'}, ...]}, ...]``.
     Never raises: a column that fails to probe is skipped.
+
+    ``row_filters`` maps table name -> row-level permission WHERE fragment
+    (AUDIT D-02). It also participates in the cache key, because the same column
+    yields a different value set per filter and the cache would otherwise serve a
+    privileged user's values to a restricted one (AUDIT D-13).
     """
     targets = select_probe_columns(tables,
                                    max_tables=settings.VALUE_LINKING_MAX_TABLES,
@@ -132,18 +168,20 @@ def collect_column_values(ds, tables: Sequence[Dict[str, Any]], exec_fn) -> Dict
 
     ds_id = int(getattr(ds, 'id', 0) or 0)
     limit = settings.VALUE_LINKING_DISTINCT_LIMIT
+    filters = row_filters or {}
     out: Dict[Tuple[str, str], List[str]] = {}
     probed = 0
 
     for table, column in targets:
-        key = (ds_id, table, column)
+        row_filter = filters.get(table)
+        key = (ds_id, _filter_key(table, row_filter), column)
         cached = _cache_get(key)
         if cached is not None:
             if cached:
                 out[(table, column)] = cached
             continue
         try:
-            values = fetch_distinct_values(ds, table, column, limit, exec_fn)
+            values = fetch_distinct_values(ds, table, column, limit, exec_fn, row_filter)
             probed += 1
         except Exception:
             # a single unprobeable column must not abort the rest
@@ -236,12 +274,30 @@ def build_value_hints(session, current_user, ds, table_names: Sequence[str], que
                                                   extract_candidate_terms, match_values)
 
         from apps.datasource.crud.datasource import get_table_obj_by_ds
+        from apps.datasource.crud.permission import collect_row_filters, is_normal_user
         from apps.db.db import exec_sql
 
         table_objs = get_table_obj_by_ds(session=session, current_user=current_user, ds=ds)
         specs = build_table_field_specs(table_objs, table_names)
         if not specs:
             return ''
+
+        # Row-level permissions (AUDIT D-02). These probes read raw cell values
+        # and surface them in the prompt AND the UI execution log, so they must
+        # respect the same row rules the generated SQL is rewritten with.
+        # Fails CLOSED: if the rules cannot be read for a restricted user we
+        # emit no hints rather than hints built from unfiltered data.
+        try:
+            row_filters = collect_row_filters(session, current_user, ds,
+                                              [s['table_name'] for s in specs])
+        except Exception:
+            traceback.print_exc()
+            if is_normal_user(current_user):
+                SQLBotLogUtil.info(
+                    'value linking skipped: row-permission lookup failed for a '
+                    'restricted user (fail-closed)')
+                return ''
+            row_filters = {}
 
         # Extract AFTER the schema is known so identifiers can be excluded. The
         # case-insensitive fallback pass would otherwise treat "revenue" in
@@ -255,7 +311,7 @@ def build_value_hints(session, current_user, ds, table_names: Sequence[str], que
         if not terms:
             return ''
 
-        values_by_column = collect_column_values(ds, specs, exec_sql)
+        values_by_column = collect_column_values(ds, specs, exec_sql, row_filters)
         if not values_by_column:
             return ''
 

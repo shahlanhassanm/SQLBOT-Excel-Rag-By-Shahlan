@@ -7,7 +7,8 @@ from sqlalchemy import and_, text
 from sqlbot_xpack.permissions.models.ds_rules import DsRules
 from sqlmodel import select
 
-from apps.datasource.crud.permission import get_column_permission_fields, get_row_permission_filters, is_normal_user
+from apps.datasource.crud.permission import collect_row_filters, get_column_permission_fields, \
+    get_row_permission_filters, is_normal_user
 from apps.datasource.embedding.table_embedding import calc_table_embedding
 from apps.datasource.utils.utils import aes_decrypt
 from apps.db.constant import DB
@@ -500,7 +501,8 @@ def _column_value_profile(rows: list, per_col: int, value_maxlen: int) -> str:
     return "\n".join(lines)
 
 
-def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list) -> str:
+def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list,
+                          row_filter: str = None) -> str:
     """Sample a table for the model: JSON rows plus a per-column value profile.
 
     The shape of the table decides how much is shown, so this works the same for
@@ -529,19 +531,32 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list) -> 
     # rather than by a column cap, which used to hide trailing total columns.
     field_names = [f"{prefix}{field.field_name}{suffix}" for field in fields]
 
+    # Row-level permission predicate (AUDIT D-02). These rows go verbatim into
+    # the model prompt and the UI execution log, so a restricted user must not
+    # be shown rows their own generated SQL would be filtered away from.
+    # Oracle/DM already carry a WHERE (ROWNUM), so the fragment is ANDed there
+    # and introduced with WHERE everywhere else.
+    _rf = str(row_filter).strip() if row_filter and str(row_filter).strip() else ''
+    _where = f" WHERE ({_rf})" if _rf else ""
+    _and = f" AND ({_rf})" if _rf else ""
+
     # Build LIMIT query based on database type
     if equals_ignore_case(ds.type, "sqlServer"):
-        query = f"SELECT TOP {probe_rows} {','.join(field_names)} FROM {prefix}{table_name}{suffix}"
+        query = (f"SELECT TOP {probe_rows} {','.join(field_names)} "
+                 f"FROM {prefix}{table_name}{suffix}{_where}")
     elif equals_ignore_case(ds.type, "ck"):
-        query = f"SELECT {','.join(field_names)} FROM {table_name} LIMIT {probe_rows}"
+        query = f"SELECT {','.join(field_names)} FROM {table_name}{_where} LIMIT {probe_rows}"
     elif equals_ignore_case(ds.type, "hive"):
-        query = f"SELECT {','.join(field_names)} FROM {table_name} LIMIT {probe_rows}"
+        query = f"SELECT {','.join(field_names)} FROM {table_name}{_where} LIMIT {probe_rows}"
     elif equals_ignore_case(ds.type, "oracle"):
-        query = f"SELECT {','.join(field_names)} FROM \"{table_name}\" WHERE ROWNUM <= {probe_rows}"
+        query = (f"SELECT {','.join(field_names)} FROM \"{table_name}\" "
+                 f"WHERE ROWNUM <= {probe_rows}{_and}")
     elif equals_ignore_case(ds.type, "dm"):
-        query = f"SELECT {','.join(field_names)} FROM \"{table_name}\" WHERE ROWNUM <= {probe_rows}"
+        query = (f"SELECT {','.join(field_names)} FROM \"{table_name}\" "
+                 f"WHERE ROWNUM <= {probe_rows}{_and}")
     else:
-        query = f"SELECT {','.join(field_names)} FROM {prefix}{table_name}{suffix} LIMIT {probe_rows}"
+        query = (f"SELECT {','.join(field_names)} FROM {prefix}{table_name}{suffix}"
+                 f"{_where} LIMIT {probe_rows}")
 
     try:
         result = exec_sql(ds=ds, sql=query, origin_column=True)
@@ -629,6 +644,24 @@ def get_tables_sample_data(session: SessionDep, current_user: CurrentUser, ds: C
     if len(table_objs) == 0:
         return ""
 
+    # Row-level permissions (AUDIT D-02). Column permissions are already applied
+    # by get_table_obj_by_ds; row rules were not applied anywhere on this path,
+    # so a restricted user's prompt contained up to TABLE_SAMPLE_PROBE_ROWS raw
+    # rows of every selected table. Fails CLOSED: if the rules cannot be read for
+    # a restricted user we emit no samples rather than unfiltered ones.
+    _wanted = [obj.table.table_name for obj in table_objs
+               if table_list is None or obj.table.table_name in table_list]
+    try:
+        row_filters = collect_row_filters(session, current_user, ds, _wanted)
+    except Exception:
+        SQLBotLogUtil.exception('row-permission lookup failed while sampling tables')
+        if is_normal_user(current_user):
+            SQLBotLogUtil.info(
+                'table sampling skipped: row-permission lookup failed for a '
+                'restricted user (fail-closed)')
+            return ""
+        row_filters = {}
+
     total_budget = settings.TABLE_SAMPLE_TOTAL_CHAR_BUDGET
     sample_data_parts = []
     used = 0
@@ -638,7 +671,8 @@ def get_tables_sample_data(session: SessionDep, current_user: CurrentUser, ds: C
             continue
         if not obj.fields:
             continue
-        sample = get_table_sample_data(ds, obj.table.table_name, obj.fields)
+        sample = get_table_sample_data(ds, obj.table.table_name, obj.fields,
+                                       row_filters.get(obj.table.table_name))
         if not sample:
             continue
         block = f"# Table: {obj.table.table_name}\n{sample}"
