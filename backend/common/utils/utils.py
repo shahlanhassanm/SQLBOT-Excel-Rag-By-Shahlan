@@ -53,7 +53,27 @@ def deepcopy_ignore_extra(src, dest):
     return dest
 
 
-def extract_nested_json(text):
+def extract_nested_json(text, prefer_keys=None):
+    """Extract a top-level JSON value from a possibly noisy LLM reply.
+
+    Returns the raw JSON substring, or None.
+
+    ``prefer_keys`` selects WHICH object to return when the reply contains more
+    than one. Without it the FIRST valid object wins, which is the historical
+    behaviour and is kept as the default so no existing caller changes.
+
+    That default is wrong whenever a model prefaces its answer with JSON — a
+    restated output format, a worked example, or an echo of the schema — because
+    the example is then parsed as the answer (AUDIT D-09). Callers that know
+    which keys the real answer carries pass them here; the LAST object
+    containing any of those keys is returned, since models put their final
+    answer last. This mirrors the convention the repo's own BIRD harness already
+    uses (``extract_sql`` takes ``m[-1]``, commented "models like to preface
+    prose").
+
+    Falls back to the first valid object when nothing matches ``prefer_keys``,
+    so a model that omits the expected key still parses exactly as before.
+    """
     stack = []
     start_index = -1
     results = []
@@ -71,11 +91,24 @@ def extract_nested_json(text):
                     try:
                         orjson.loads(json_str)  # 验证有效性
                         results.append(json_str)
-                    except:
+                    except Exception:
                         pass
             else:
                 stack = []  # 括号不匹配则重置
-    if len(results) > 0 and results[0]:
+
+    if not results:
+        return None
+
+    if prefer_keys:
+        for json_str in reversed(results):
+            try:
+                data = orjson.loads(json_str)
+            except Exception:
+                continue
+            if isinstance(data, dict) and any(k in data for k in prefer_keys):
+                return json_str
+
+    if results[0]:
         return results[0]
     return None
 

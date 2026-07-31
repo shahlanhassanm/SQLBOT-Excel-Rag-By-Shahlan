@@ -954,7 +954,7 @@ class LLMService:
         """Extract SQL from a candidate answer without any logging/saving side
         effects (check_sql writes error logs and is tied to the main record)."""
         try:
-            json_str = extract_nested_json(text or '')
+            json_str = extract_nested_json(text or '', prefer_keys=('sql', 'success'))
             if not json_str:
                 return None
             data = orjson.loads(json_str)
@@ -1156,7 +1156,7 @@ class LLMService:
                             feedback=feedback, current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))))
                 text, _, _ = self._invoke_llm_blocking(self.sql_message)
                 self.sql_message.append(AIMessage(text))
-                json_str = extract_nested_json(text)
+                json_str = extract_nested_json(text, prefer_keys=('sql', 'success'))
                 data = None
                 if json_str:
                     try:
@@ -1842,7 +1842,10 @@ class LLMService:
                                                                   token_usage=token_usage)
 
     def check_sql(self, session: Session, res: str, operate: OperationEnum) -> tuple[str, Optional[list]]:
-        json_str = extract_nested_json(res)
+        # prefer the LAST object carrying the answer keys: a model that prefaces
+        # its reply with an example object would otherwise have the example
+        # parsed as its answer (AUDIT D-09).
+        json_str = extract_nested_json(res, prefer_keys=('sql', 'success'))
 
         log = self.current_logs[operate]
 
@@ -1885,7 +1888,7 @@ class LLMService:
 
     @staticmethod
     def get_chart_type_from_sql_answer(res: str) -> Optional[str]:
-        json_str = extract_nested_json(res)
+        json_str = extract_nested_json(res, prefer_keys=('sql', 'success'))
         if json_str is None:
             return None
 
@@ -1902,7 +1905,7 @@ class LLMService:
 
     @staticmethod
     def get_brief_from_sql_answer(res: str) -> Optional[str]:
-        json_str = extract_nested_json(res)
+        json_str = extract_nested_json(res, prefer_keys=('sql', 'success'))
         if json_str is None:
             return None
 
@@ -1927,7 +1930,7 @@ class LLMService:
 
     def check_save_chart(self, session: Session, res: str) -> Dict[str, Any]:
 
-        json_str = extract_nested_json(res)
+        json_str = extract_nested_json(res, prefer_keys=('type',))
         if json_str is None:
             raise SingleMessageError(orjson.dumps({'message': 'Cannot parse chart config from answer',
                                                    'traceback': "Cannot parse chart config from answer:\n" + res}).decode())
