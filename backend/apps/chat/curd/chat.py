@@ -38,7 +38,7 @@ def get_chat_record_by_id(session: SessionDep, record_id: int):
 
 
 def get_chat_record_by_id_with_user(session: SessionDep, current_user: CurrentUser,
-                                    record_id: int) -> Optional[ChatRecord]:
+                                    record_id: int) -> ChatRecord | None:
     """Owner-scoped variant of ``get_chat_record_by_id``.
 
     A record belonging to another user is indistinguishable from a missing one,
@@ -57,7 +57,7 @@ def get_chat_record_by_id_with_user(session: SessionDep, current_user: CurrentUs
 
 
 def get_analysis_base_record_with_user(session: SessionDep, current_user: CurrentUser,
-                                       chat_record_id: int) -> Optional[ChatRecord]:
+                                       chat_record_id: int) -> ChatRecord | None:
     """Load the record an /analysis or /predict request is based on, owner-scoped.
 
     Carries the extra columns those two actions consume (``chart`` and ``data``)
