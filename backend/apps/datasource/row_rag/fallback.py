@@ -6,6 +6,7 @@ confidence floor (caller then shows the normal 'no match' message). Never invent
 content.
 """
 import traceback
+from collections.abc import Sequence
 from typing import Any, Dict, List, Optional
 
 from apps.ai_model.embedding import EmbeddingModelCache
@@ -25,13 +26,22 @@ def _parse_content_text(text: str) -> Dict[str, Any]:
     return row
 
 
-def row_rag_fallback(engine, question: str) -> Optional[Dict[str, Any]]:
+def row_rag_fallback(engine, question: str,
+                     table_names: Sequence[str] | None = None) -> Optional[Dict[str, Any]]:
+    """Semantic row retrieval restricted to ``table_names``.
+
+    ``table_names`` is the set of tables the asking user is allowed to read.
+    It is threaded through to ``store.query_topk``, which fails closed on an
+    empty set — ``row_embeddings`` is a single global store shared by every
+    workspace, so an unrestricted search returns other tenants' rows
+    (AUDIT D-01).
+    """
     if not settings.ROW_RAG_ENABLED:
         return None
     try:
         model = EmbeddingModelCache.get_model()
         q_emb = model.embed_query(question)
-        raw = store.query_topk(engine, q_emb, settings.ROW_RAG_TOP_K)
+        raw = store.query_topk(engine, q_emb, settings.ROW_RAG_TOP_K, table_names)
         candidates: List[Dict[str, Any]] = [
             {"table_name": r["table_name"], "content_text": r["content_text"],
              "cosine": r["cosine"], "row": _parse_content_text(r["content_text"])}

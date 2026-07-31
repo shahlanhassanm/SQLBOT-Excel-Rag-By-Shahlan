@@ -43,8 +43,10 @@ def test_semantic_row_fallback_retrieves_sentinel_and_rejects_gibberish():
 
     try:
         # near-paraphrase of the sentinel -> the sentinel row should be the top hit
+        # The allow-list is required since AUDIT D-01: row_embeddings is a global
+        # store, so the search is scoped to the tables the caller may read.
         hit = row_rag_fallback(eng, "origami dragon teaching calculus to penguins in a "
-                                    "floating library in antarctica")
+                                    "floating library in antarctica", [table])
         assert hit is not None, "sentinel should be retrievable"
         assert hit["fields"][0] == "source"
         assert hit["data"][0].get("Title") == "ZZ Sentinel Row", \
@@ -55,7 +57,14 @@ def test_semantic_row_fallback_retrieves_sentinel_and_rejects_gibberish():
         # note pure random-character gibberish is a known weak spot of the embedding
         # model and is NOT asserted here - users type real words.)
         miss = row_rag_fallback(eng, "the biochemistry of photosynthesis in tropical "
-                                     "rainforest canopy plants")
+                                     "rainforest canopy plants", [table])
         assert miss is None
+
+        # D-01: a caller whose allow-list excludes the sentinel's table must not
+        # retrieve it, even with the query that ranks it top.
+        other_tenant = row_rag_fallback(
+            eng, "origami dragon teaching calculus to penguins in a "
+                 "floating library in antarctica", ["__some_other_tenants_table__"])
+        assert other_tenant is None, "sentinel leaked across the table allow-list"
     finally:
         store.delete_table(eng, table)

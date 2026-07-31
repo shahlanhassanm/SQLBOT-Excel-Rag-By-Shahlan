@@ -5,6 +5,7 @@ Single table ``row_embeddings`` in the bundled Postgres. Keyed on table_name
 (globally unique via import hash suffix); datasource_id is nullable because the
 CoreDatasource row does not exist yet when tables are imported.
 """
+from collections.abc import Sequence
 from typing import Any, Dict, List, Optional
 
 from common.core.config import settings
@@ -102,11 +103,29 @@ def insert_rows(engine, table_name: str, contents: List[str],
     return inserted
 
 
-def query_topk(engine, q_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:
+def query_topk(engine, q_embedding: List[float], top_k: int,
+               table_names: Sequence[str] | None) -> List[Dict[str, Any]]:
     """Return up to top_k rows ordered by cosine similarity (descending).
-    Each item: {table_name, content_text, cosine}. Returns [] if table absent."""
+
+    Each item: {table_name, content_text, cosine}. Returns [] if the table is
+    absent.
+
+    ``table_names`` is the set of tables the caller is allowed to read and is
+    REQUIRED. ``row_embeddings`` is a single global store shared by every
+    datasource and every workspace, and its ``datasource_id`` column is nullable
+    and never populated by the importer, so without this filter the search
+    returns rows from other tenants' spreadsheets (AUDIT D-01).
+
+    Fails CLOSED: an empty or None allow-list yields no results rather than all
+    results, so a caller that cannot determine the permitted set leaks nothing.
+    """
     if not q_embedding:
         return []
+    if not table_names:
+        SQLBotLogUtil.info(
+            "row_rag: empty table allow-list, returning no candidates (fail-closed)")
+        return []
+    allowed = [str(t) for t in table_names]
     conn = engine.raw_connection()
     cur = conn.cursor()
     try:
@@ -125,8 +144,9 @@ def query_topk(engine, q_embedding: List[float], top_k: int) -> List[Dict[str, A
         qv = _vec_literal(q_embedding)
         cur.execute(
             "SELECT table_name, content_text, 1 - (embedding <=> %s::vector) AS cosine "
-            "FROM row_embeddings ORDER BY embedding <=> %s::vector LIMIT %s",
-            (qv, qv, int(top_k)),
+            "FROM row_embeddings WHERE table_name = ANY(%s) "
+            "ORDER BY embedding <=> %s::vector LIMIT %s",
+            (qv, allowed, qv, int(top_k)),
         )
         rows = cur.fetchall()
     finally:

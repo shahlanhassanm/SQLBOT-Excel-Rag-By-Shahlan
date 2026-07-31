@@ -2078,13 +2078,28 @@ class LLMService:
     def _row_rag_fallback_table(self, _session, question):
         """Last-resort semantic row retrieval, used only after the SQL pipeline
         fails. Returns a {fields, data} table of grounded rows, or None when
-        nothing clears the confidence floor. Never invents content."""
+        nothing clears the confidence floor. Never invents content.
+
+        The search is restricted to the tables this caller may read: the bound
+        datasource when there is one, otherwise every datasource in the caller's
+        workspace. row_embeddings is a single global store shared by all
+        workspaces, so an unrestricted search returns other tenants' rows
+        (AUDIT D-01). Fails closed — an allow-list we cannot build yields no
+        fallback rather than an unfiltered one."""
         from common.core.config import settings
         if not settings.ROW_RAG_ENABLED or not _session:
             return None
         try:
+            from apps.datasource.crud.table import get_readable_table_names
             from apps.datasource.row_rag.fallback import row_rag_fallback
-            table = row_rag_fallback(_session.get_bind(), question)
+            _oid = getattr(self.current_user, 'oid', None) or 1
+            _ds_id = self.ds.id if isinstance(self.ds, CoreDatasource) else None
+            _allowed = get_readable_table_names(_session, _oid, _ds_id)
+            if not _allowed:
+                SQLBotLogUtil.info(
+                    'row_rag fallback skipped: no readable tables for this caller')
+                return None
+            table = row_rag_fallback(_session.get_bind(), question, _allowed)
         except Exception:
             traceback.print_exc()
             return None

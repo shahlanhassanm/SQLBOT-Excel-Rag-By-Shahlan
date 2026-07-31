@@ -212,9 +212,32 @@ def build_ds_schema_text(session, ds: CoreDatasource, include_samples: bool = Fa
 
 
 def get_ds_table_names(session, ds_id: int, limit: int = 15) -> List[str]:
-    """Table names of a datasource, for richer routing/candidate payloads."""
+    """Table names of a datasource, for richer routing/candidate payloads.
+
+    NOTE: this is CAPPED at ``limit`` and is a display/routing helper. Do not use
+    it to build a security allow-list — use ``get_readable_table_names``, which
+    is uncapped, because a truncated allow-list silently drops real tables.
+    """
     tables = session.query(CoreTable.table_name).filter(CoreTable.ds_id == ds_id).limit(limit).all()
     return [t[0] for t in tables]
+
+
+def get_readable_table_names(session, oid: int, ds_id: int | None = None) -> list[str]:
+    """Every physical table name the caller may read — the row-RAG allow-list.
+
+    Scoped to one datasource when ``ds_id`` is given, otherwise to every
+    datasource in workspace ``oid``. Deliberately UNCAPPED: this feeds the
+    ``WHERE table_name = ANY(...)`` filter in the row-embedding search
+    (AUDIT D-01), and a cap would silently exclude a datasource's later tables
+    from its own user's results.
+    """
+    query = session.query(CoreTable.table_name).join(
+        CoreDatasource, CoreTable.ds_id == CoreDatasource.id)
+    if ds_id is not None:
+        query = query.filter(CoreTable.ds_id == ds_id)
+    else:
+        query = query.filter(CoreDatasource.oid == oid)
+    return [t[0] for t in query.all()]
 
 
 # The Excel/CSV importer hardcodes description=f"Excel file: {filename}" for every
