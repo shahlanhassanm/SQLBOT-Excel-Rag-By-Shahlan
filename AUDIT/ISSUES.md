@@ -20,11 +20,12 @@ One row per item. Detail lives in the phase document named in the last column.
 | **D-04** | ✅ **FIXED** | `cc8a208` | ↑ |
 | **D-07** | ✅ **FIXED** | `740a5ff` | +13 |
 | **D-01** | ✅ **FIXED** | `4d15453` | +8 |
-| **D-02** | OPEN — in progress | — | — |
-| **D-05** | **BLOCKED** — impact report required before any authorization change | — | — |
+| **D-02** | ✅ **FIXED** | `3b057a1` | +24 |
+| **D-13** (value-cache half) | ✅ **FIXED** | `3b057a1` | ↑ |
+| **D-05** | **BLOCKED — report delivered**, awaiting approval: `AUDIT/06_D05_authz_impact.md` | — | — |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
-Test count: **272 → 305 passing** (root suite), `backend/tests` 28/28 throughout.
+Test count: **272 → 329 passing** (root suite), `backend/tests` 28/28 throughout.
 Gates in force (approved): per-file no-new-ruff, per-file no-new-mypy,
 `import main` as build proxy, benchmarks only for changes that can affect SQL
 generation / retrieval / ranking / prompting / execution / evaluation.
@@ -36,7 +37,7 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | ID | Category | Location | Issue | Evidence | Status |
 |---|---|---|---|---|---|
 | **D-01** | security · multi-tenant | `apps/datasource/row_rag/store.py:126` | Row-RAG fallback vector search has **no datasource, workspace or user filter** — `SELECT … FROM row_embeddings ORDER BY embedding <=> …` returns rows from every tenant's spreadsheets and renders them as the answer. `ROW_RAG_ENABLED: "true"` is live in compose. | 📖 | ✅ FIXED `4d15453` |
-| **D-02** | security · authz | `apps/datasource/crud/datasource.py:503-614`, `apps/datasource/value_index.py:78-118` | Table samples (50 raw rows/table) and `<value-hints>` bypass **row-level permissions** and go into the prompt *and* the UI execution log. Column permissions are applied; row permissions are not. | 📖 | OPEN |
+| **D-02** | security · authz | `apps/datasource/crud/datasource.py:503-614`, `apps/datasource/value_index.py:78-118` | Table samples (50 raw rows/table) and `<value-hints>` bypass **row-level permissions** and go into the prompt *and* the UI execution log. Column permissions are applied; row permissions are not. | 📖 | ✅ FIXED `3b057a1` |
 | **D-03** | security · IDOR | `apps/chat/api/chat.py:415-439` | `POST /chat/record/{id}/{analysis\|predict}` has no `@require_permissions` and selects `ChatRecord` by id with **no `create_by` predicate** — any user can run analysis on any user's result set. | 📖 | ✅ FIXED `cc8a208` |
 | **D-04** | security · IDOR | `apps/chat/api/chat.py:225`, `apps/chat/curd/chat.py:24` | `POST /chat/recommend_questions/{id}` — `get_chat_record_by_id` has no ownership filter; leaks another user's question and pulls their datasource's history into the prompt. | 📖 | ✅ FIXED `cc8a208` |
 | **D-05** | security · authz | `apps/datasource/crud/permission.py:76` | `is_normal_user() → id != 1`. User id 1 bypasses **all** row and column permissions regardless of role. Three different notions of "privileged" coexist in the codebase. | 📖 | OPEN |
@@ -54,7 +55,7 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | ID | Category | Location | Issue | Evidence | Status |
 |---|---|---|---|---|---|
 | **D-12** | functional | `apps/chat/task/llm.py:1061` | **Cross-datasource fanout/split is dead for every user except id 1** — `if is_normal_user(...): return single`. The headline multi-file feature, documented as active in `important.md`, never runs for real accounts. | 📖 | OPEN |
-| **D-13** | correctness · cache | `apps/datasource/relations.py:567`, `apps/datasource/value_index.py:139` | Cache keys omit the permission dimension. Relations cached from user A's column-filtered view are served to user B for 3600 s; value caches serve privileged cell values to restricted users. | 📖 | OPEN |
+| **D-13** | correctness · cache | `apps/datasource/relations.py:567`, `apps/datasource/value_index.py:139` | Cache keys omit the permission dimension. Relations cached from user A's column-filtered view are served to user B for 3600 s; value caches serve privileged cell values to restricted users. | 📖 | ⚠️ PARTIAL `3b057a1` (value cache fixed; relations cache still open) |
 | **D-14** | scalability | `apps/chat/task/llm.py:75`, `common/utils/embedding_threads.py:6` | Two module-global `ThreadPoolExecutor(max_workers=200)` = 400 threads on a `--workers 1` uvicorn. Each can hold a DB session, a `NullPool` datasource connection and an LLM stream. `PG_POOL_SIZE=20` does not bound it. | 📖 | OPEN |
 | **D-15** | correctness · cache | `apps/ai_model/model_factory.py:138` | `@lru_cache(maxsize=32)` on `create_llm` is never invalidated; a rotated API key leaves the old authenticated client resident indefinitely. | 📖 | OPEN |
 | **D-16** | resource · data | `apps/chat/task/llm.py:2006-2019` | `save_sql_data` truncates to 1000 rows **only when `enable_sql_row_limit` is true** — which compose sets to `false`. Unbounded result sets are serialised into a `Text` column. The compose comment justifying the flag cites this cap, circularly. | 📖 | OPEN |
