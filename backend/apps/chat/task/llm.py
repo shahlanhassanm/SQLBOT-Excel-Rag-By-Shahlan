@@ -43,8 +43,9 @@ from apps.chat.task.agentic import (build_result_preview, format_retry_feedback,
                                     is_listing_question, has_explicit_row_count,
                                     result_fingerprint, select_by_consensus,
                                     REFUSAL_TAG as _REFUSAL_TAG, is_refusal_message,
-                                    strip_refusal_tag, refusal_retry_feedback)
-from apps.chat.task.sql_validate import (format_identifier_feedback,
+                                    strip_refusal_tag, refusal_retry_feedback,
+                                    apply_nulls_last)
+from apps.chat.task.sql_validate import (format_identifier_feedback, sqlglot_dialect,
                                          validate_sql_identifiers)
 
 
@@ -885,6 +886,27 @@ class LLMService:
             traceback.print_exc()
             return True, ''
 
+    def _apply_nulls_last(self, sql: str) -> str:
+        """Deterministic `ORDER BY x DESC` -> `... DESC NULLS LAST` (AUDIT L-A).
+
+        PostgreSQL and Oracle sort NULL as larger than any value, so a
+        superlative query returns a NULL row instead of the answer. Gated to the
+        dialects that both need it and accept it, and fails open on any error --
+        an unparseable statement is executed exactly as the model wrote it."""
+        if not settings.AGENTIC_NULLS_LAST_ENABLED or not sql:
+            return sql
+        try:
+            ds_type = (getattr(self.ds, 'type', None) or '').strip().lower()
+            if ds_type not in _csv_terms(settings.AGENTIC_NULLS_LAST_DIALECTS):
+                return sql
+            rewritten = apply_nulls_last(sql, sqlglot_dialect(ds_type))
+            if rewritten != sql:
+                SQLBotLogUtil.info('nulls-last rewrite applied')
+            return rewritten
+        except Exception:
+            traceback.print_exc()
+            return sql
+
     def _maybe_raise_limit(self, sql: str) -> str:
         """Lift an over-small trailing LIMIT, but only for retrieval
         ("list/show all X") questions — the lift exists to complete listings.
@@ -1009,7 +1031,7 @@ class LLMService:
                 if self.validate_identifiers(candidate_sql):
                     dropped['identifier'] += 1
                     continue
-                execute_sql = self._maybe_raise_limit(candidate_sql)
+                execute_sql = self._apply_nulls_last(self._maybe_raise_limit(candidate_sql))
                 try:
                     candidate_result = self.execute_sql(sql=execute_sql)
                 except Exception:
@@ -1206,7 +1228,7 @@ class LLMService:
                     feedback = format_retry_feedback('parse', 'answer was not a valid SQL JSON object', None)
                     continue
                 # legs of a listing question: lift an over-small model LIMIT
-                leg_sql = self._maybe_raise_limit(leg_sql)
+                leg_sql = self._apply_nulls_last(self._maybe_raise_limit(leg_sql))
                 try:
                     result = self.execute_sql(sql=leg_sql)
                 except Exception as e:
@@ -2439,6 +2461,7 @@ class LLMService:
                     # is_listing_question: on a superlative/aggregation question
                     # the model's LIMIT 1 IS the answer and must survive.
                     real_execute_sql = self._maybe_raise_limit(real_execute_sql)
+                    real_execute_sql = self._apply_nulls_last(real_execute_sql)
                     self.current_logs[OperationEnum.EXECUTE_SQL] = start_log(session=_session,
                                                                              operate=OperationEnum.EXECUTE_SQL,
                                                                              record_id=self.record.id,

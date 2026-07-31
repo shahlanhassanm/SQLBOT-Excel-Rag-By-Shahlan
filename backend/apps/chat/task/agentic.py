@@ -425,6 +425,56 @@ def raise_sql_limit(sql: str, target: int = 1000) -> str:
     return core + (';' if trailing_semi else '')
 
 
+# ---------------------------------------------------------------------------
+# Deterministic NULLS LAST for descending sorts.
+#
+# PostgreSQL (and Oracle) treat NULL as larger than any value, so
+# `ORDER BY score DESC LIMIT 1` returns a NULL row instead of the maximum. The
+# SQL prompt already carries an explicit rule telling the model to write
+# NULLS LAST -- and on BIRD-150 the model ignored it on 17 of 72 failures.
+# Rewriting deterministically after generation is free, costs no LLM call, and
+# was measured to convert 5 questions from wrong to correct with 0 regressions
+# across the 9 correct answers it also touches (AUDIT lever L-A).
+#
+# sqlglot rather than a regex: a regex would also rewrite DESC inside a string
+# literal ("sort DESC now") or a column named "desc". Fails OPEN -- any parse
+# problem returns the original SQL untouched.
+# ---------------------------------------------------------------------------
+def apply_nulls_last(sql: str, dialect: str | None = None) -> str:
+    """Add ``NULLS LAST`` to every descending ORDER BY term in ``sql``.
+
+    ``dialect`` is a sqlglot dialect name; the caller decides whether the
+    datasource's dialect needs this at all (MySQL/SQL Server/SQLite/ClickHouse
+    already sort NULLs last on DESC and mostly reject the syntax).
+
+    Idempotent: SQL that already says NULLS LAST is returned unchanged.
+    """
+    if not sql or not sql.strip():
+        return sql
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except Exception:
+        return sql
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return sql
+    if tree is None:
+        return sql
+    try:
+        changed = 0
+        for ordered in tree.find_all(exp.Ordered):
+            if ordered.args.get('desc') and ordered.args.get('nulls_first') is not False:
+                ordered.set('nulls_first', False)
+                changed += 1
+        if not changed:
+            return sql
+        return tree.sql(dialect=dialect)
+    except Exception:
+        return sql
+
+
 # English fallbacks used when the caller passes no term lists. The real lists
 # come from settings (multilingual, env-overridable) so nothing is hardcoded to
 # one language; these defaults only keep the function usable standalone/in tests.

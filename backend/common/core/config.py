@@ -225,6 +225,17 @@ class Settings(BaseSettings):
     LLM_MAX_OUTPUT_TOKENS: int = 1500
     # "list all X" completeness: lift an over-small model LIMIT up to this cap.
     AGENTIC_FULL_RESULT_LIMIT: int = 1000
+    # Deterministic `ORDER BY x DESC` -> `... DESC NULLS LAST` rewrite before
+    # execution. PostgreSQL and Oracle sort NULL as larger than any value, so
+    # `ORDER BY score DESC LIMIT 1` returns a NULL row instead of the maximum.
+    # The SQL prompt already asks for NULLS LAST and the model ignored it on 17
+    # of 72 BIRD-150 failures; rewriting is free and was measured at +5 questions
+    # (+3.3pp EX) with 0 regressions. Costs no LLM call.
+    AGENTIC_NULLS_LAST_ENABLED: bool = True
+    # Only dialects that BOTH sort NULLs first on DESC and accept NULLS LAST.
+    # MySQL/SQL Server/SQLite/ClickHouse/Hive already sort NULLs last on DESC and
+    # mostly reject the syntax, so they are deliberately absent.
+    AGENTIC_NULLS_LAST_DIALECTS: str = 'pg,excel,kingbase,redshift,oracle,dm'
     # Fanout co-relevance: a datasource is a fanout candidate when its cosine is
     # >= max(FLOOR, primary_cosine - MARGIN). Tune per embedding model.
     AGENTIC_FANOUT_COSINE_FLOOR: float = 0.40
@@ -332,6 +343,7 @@ class Settings(BaseSettings):
                      'AGENTIC_DECOMPOSE_ENABLED',
                      'AGENTIC_HYBRID_RANKING_ENABLED',
                      'AGENTIC_IDENTIFIER_CHECK_ENABLED',
+                     'AGENTIC_NULLS_LAST_ENABLED',
                      'AGENTIC_SELF_CONSISTENCY_ENABLED',
                      'VALUE_LINKING_ENABLED',
                      'SKELETON_FEWSHOT_ENABLED',
