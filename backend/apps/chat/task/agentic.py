@@ -513,14 +513,45 @@ def is_listing_question(question: str, listing_terms: Optional[Sequence[str]] = 
     return _matches_any(question, listing_terms) and not _matches_any(question, aggregation_terms)
 
 
-# A standalone 1-3 digit number reads as an explicit row request ("top 10",
-# "前10条", "5 records"); 4-digit tokens (years) are ignored. Language-agnostic.
-_SMALL_INT_RE = re.compile(r'(?<!\d)\d{1,3}(?!\d)')
+# An explicit row request is a small number ADJACENT to a count word: "top 10",
+# "first 5 orders", "前10条", "상위 5개". Matching any standalone 1-3 digit
+# number anywhere instead meant "list all customers in region 3" was read as a
+# row request, which switched off the completeness LIMIT lift on exactly the
+# listing questions it exists to fix (AUDIT D-18). 4-digit tokens (years) are
+# still ignored.
+#
+# Terms are configurable via AGENTIC_ROW_COUNT_KEYWORDS so a deployment can
+# extend them per language without a code change.
+# Count words AND plural count nouns: "top 10" and "show 5 records" are both
+# explicit row requests. Extendable via AGENTIC_ROW_COUNT_KEYWORDS.
+DEFAULT_ROW_COUNT_TERMS = ['top', 'first', 'last', 'limit', 'bottom', 'head',
+                           'record', 'records', 'row', 'rows', 'result', 'results',
+                           'item', 'items', 'entry', 'entries',
+                           '前', '最前', '头', '条', '상위', '하위', '개', '건']
+# The number must be a STANDALONE token — not preceded by an ASCII letter or
+# digit — so "Q4 items" is not a row request while "前10条" still is (CJK
+# prefixes are non-ASCII and therefore allowed).
+_SMALL_INT = r'(?<![A-Za-z0-9_])\d{1,3}(?!\d)'
 
 
-def has_explicit_row_count(question: str) -> bool:
+def has_explicit_row_count(question: str,
+                           count_terms: Sequence[str] | None = None) -> bool:
     """True when the user explicitly asked for a specific (small) number of rows,
-    in which case the model's LIMIT must be respected rather than raised."""
+    in which case the model's LIMIT must be respected rather than raised.
+
+    The number must sit next to a count word — before or after, with at most one
+    intervening word — so an incidental figure elsewhere in the sentence does
+    not count.
+    """
     if not question:
         return False
-    return bool(_SMALL_INT_RE.search(question))
+    terms = [t for t in (count_terms or DEFAULT_ROW_COUNT_TERMS) if t and t.strip()]
+    if not terms:
+        return False
+    low = question.lower()
+    alternation = '|'.join(re.escape(t.strip().lower()) for t in terms)
+    # <term> [one optional word] <number>     e.g. "top 10", "first 5 orders"
+    before = re.compile(rf'(?:{alternation})\s*\w*\s*{_SMALL_INT}')
+    # <number> [one optional word] <term>     e.g. "10 条", "5 개", "5 records"
+    after = re.compile(rf'{_SMALL_INT}\s*\w*\s*(?:{alternation})')
+    return bool(before.search(low) or after.search(low))

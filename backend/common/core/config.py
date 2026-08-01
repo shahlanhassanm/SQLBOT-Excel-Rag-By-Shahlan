@@ -249,6 +249,12 @@ class Settings(BaseSettings):
         'list,show,display,find,all,every,each,get,give,'
         '列出,显示,展示,查找,所有,全部,每个,列表,'
         '목록,모두,모든,전체,보여,표시')
+    # Terms that make a nearby small number an EXPLICIT row request ("top 10",
+    # "show 5 records", "상위 5개"), which suppresses the completeness LIMIT lift.
+    AGENTIC_ROW_COUNT_KEYWORDS: str = (
+        'top,first,last,limit,bottom,head,'
+        'record,records,row,rows,result,results,item,items,entry,entries,'
+        '前,最前,头,条,상위,하위,개,건')
     AGENTIC_AGGREGATION_KEYWORDS: str = (
         'sum,total,average,avg,how many,number of,count,max,min,highest,lowest,trend,growth,'
         '总和,总计,合计,平均,多少,数量,计数,最大,最小,最高,最低,趋势,增长,'

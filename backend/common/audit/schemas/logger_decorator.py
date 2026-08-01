@@ -314,7 +314,7 @@ class SystemLogger:
 
                 # Attempt to extract from the dictionary
                 return SystemLogger.extract_resource_id(expression, params_dict, "kwargs")
-        except:
+        except Exception:
             pass
 
         return None
@@ -328,7 +328,7 @@ class SystemLogger:
             current_user = getattr(request.state, 'current_user', None)
             if current_user:
                 return current_user
-        except:
+        except Exception:
             pass
 
         return None

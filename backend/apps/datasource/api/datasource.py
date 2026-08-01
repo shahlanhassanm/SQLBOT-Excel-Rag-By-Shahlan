@@ -3,10 +3,9 @@ import hashlib
 import io
 import json
 import os
-import traceback
 import uuid
 from io import StringIO
-from typing import List
+from typing import Any, List
 from urllib.parse import quote
 
 import pandas as pd
@@ -376,38 +375,16 @@ async def upload_excel(session: SessionDep, file: UploadFile = File(..., descrip
     return await asyncio.to_thread(inner)
 
 
-def insert_pg(df, tableName, engine):
-    # fix field type
-    for i in range(len(df.dtypes)):
-        if str(df.dtypes[i]) == 'uint64':
-            df[str(df.columns[i])] = df[str(df.columns[i])].astype('string')
+def insert_pg(df: pd.DataFrame, tableName: str, engine: Any) -> None:
+    """Deprecated loader kept for the deprecated /uploadExcel endpoint.
 
-    conn = engine.raw_connection()
-    cursor = conn.cursor()
-    try:
-        df.to_sql(
-            tableName,
-            engine,
-            if_exists='replace',
-            index=False
-        )
-        # trans csv
-        output = StringIO()
-        df.to_csv(output, sep='\t', header=False, index=False)
-        # output.seek(0)
-
-        # pg copy
-        query = sql.SQL("COPY {} FROM STDIN WITH CSV DELIMITER E'\t'").format(
-            sql.Identifier(tableName)
-        )
-        cursor.copy_expert(sql=query.as_string(cursor.connection), file=output)
-        conn.commit()
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(400, str(e))
-    finally:
-        cursor.close()
-        conn.close()
+    It used to duplicate the COPY logic and carried the bug _insert_df_to_pg
+    documents as fixed: the StringIO was never rewound, so COPY read nothing and
+    the slow to_sql silently did the insert. It also lacked the NULL '' handling
+    and the drop-on-failure cleanup. Delegating removes the second
+    implementation entirely (AUDIT D-24).
+    """
+    return _insert_df_to_pg(df, tableName, engine)
 
 
 t_sheet = "数据表列表"
@@ -618,7 +595,7 @@ async def reparse_excel(req: ReparseSheetRequest):
     return await asyncio.to_thread(inner)
 
 
-def _insert_df_to_pg(df, table_name, engine):
+def _insert_df_to_pg(df: pd.DataFrame, table_name: str, engine: Any) -> None:
     """Create ``table_name`` from ``df``'s schema and bulk-load its rows via COPY.
 
     Schema is created with an EMPTY frame (no row insert), then a single rewound

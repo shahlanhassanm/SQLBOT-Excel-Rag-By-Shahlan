@@ -593,7 +593,7 @@ def convert_value(value, datetime_format='space'):
                     return bool(int_val)
                 else:
                     return int_val
-            except:
+            except Exception:
                 # 如果转换失败，尝试解码为字符串
                 pass
 

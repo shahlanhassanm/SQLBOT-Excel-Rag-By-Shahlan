@@ -274,7 +274,7 @@ def prepare_model_arg(origin_arg: str):
         return origin_arg
     try:
         return json.loads(origin_arg)
-    except:
+    except Exception:
         return origin_arg
     
 def get_origin_from_referer(request: Request):

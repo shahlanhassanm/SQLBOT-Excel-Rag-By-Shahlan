@@ -320,7 +320,12 @@ def resolve_header_row(raw: pd.DataFrame, context: str = "") -> tuple[int, float
             llm_idx = llm_detect_header_row(raw, context)
             if llm_idx is not None and llm_idx != idx:
                 logger.info("LLM header override row %s -> %s for %s", idx, llm_idx, context)
-                return llm_idx, max(confidence, CONFIDENCE_THRESHOLD)
+                # Return the MEASURED heuristic confidence, not a synthesised
+                # floor. The fallback only fires when the heuristic is unsure, so
+                # reporting the override as confident hid the "please review"
+                # prompt in exactly the case that needs it: headerConfidence
+                # drives that prompt in the preview UI (AUDIT D-17).
+                return llm_idx, confidence
     except Exception as e:
         logger.warning("LLM header fallback failed (%s); keeping heuristic for %s", e, context)
 

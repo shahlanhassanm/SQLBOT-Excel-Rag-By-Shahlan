@@ -276,8 +276,12 @@ def get_chart_data_with_user(session: SessionDep, current_user: CurrentUser, cha
     for row in res:
         try:
             return orjson.loads(row.data)
-        except Exception:
-            pass
+        except Exception as e:
+            # A corrupt / truncated payload is otherwise indistinguishable from
+            # "no such record" and from "not yours" — all three render as
+            # "no data" with nothing logged (AUDIT D-20).
+            SQLBotLogUtil.warning(
+                f'chat record data is not valid JSON, returning empty result: {e}')
     return {}
 
 def get_chart_data_with_user_live(session: SessionDep, current_user: CurrentUser, chat_record_id: int):
@@ -312,8 +316,12 @@ def get_chat_chart_data(session: SessionDep, chat_record_id: int):
     for row in res:
         try:
             return orjson.loads(row.data)
-        except Exception:
-            pass
+        except Exception as e:
+            # A corrupt / truncated payload is otherwise indistinguishable from
+            # "no such record" and from "not yours" — all three render as
+            # "no data" with nothing logged (AUDIT D-20).
+            SQLBotLogUtil.warning(
+                f'chat record data is not valid JSON, returning empty result: {e}')
     return {}
 
 
@@ -324,8 +332,9 @@ def get_chat_predict_data_with_user(session: SessionDep, current_user: CurrentUs
     for row in res:
         try:
             return orjson.loads(row.predict_data)
-        except Exception:
-            pass
+        except Exception as e:
+            SQLBotLogUtil.warning(
+                f'chat record predict_data is not valid JSON, returning empty result: {e}')
     return {}
 
 
@@ -335,8 +344,9 @@ def get_chat_predict_data(session: SessionDep, chat_record_id: int):
     for row in res:
         try:
             return orjson.loads(row.predict_data)
-        except Exception:
-            pass
+        except Exception as e:
+            SQLBotLogUtil.warning(
+                f'chat record predict_data is not valid JSON, returning empty result: {e}')
     return {}
 
 

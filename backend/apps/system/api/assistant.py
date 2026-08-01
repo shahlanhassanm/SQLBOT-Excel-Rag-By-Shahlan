@@ -3,7 +3,7 @@ import os
 from datetime import timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Form, HTTPException, Path, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Path, Query, Request, Response, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlbot_xpack.file_utils import SQLBotFileUtils
 from sqlmodel import select
@@ -112,7 +112,10 @@ async def picture(file_id: str = Path(description="file_id")):
 
 @router.patch('/ui', summary=f"{PLACEHOLDER_PREFIX}assistant_ui_api", description=f"{PLACEHOLDER_PREFIX}assistant_ui_api")
 @system_log(LogConfig(operation_type=OperationType.UPDATE, module=OperationModules.APPLICATION, result_id_expr="id"))
-async def ui(session: SessionDep, data: str = Form(), files: List[UploadFile] = []):
+async def ui(session: SessionDep, data: str = Form(),
+             files: Optional[List[UploadFile]] = File(default=None)):
+    # `= []` was a MUTABLE DEFAULT shared across every request (AUDIT D-23).
+    files = files or []
     json_data = json.loads(data)
     uiSchema = AssistantUiSchema(**json_data)
     id = uiSchema.id

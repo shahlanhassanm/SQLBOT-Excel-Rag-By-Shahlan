@@ -913,7 +913,8 @@ class LLMService:
         Applied unconditionally it turns a correct superlative answer
         (`ORDER BY x DESC LIMIT 1`) into a 1000-row table. An explicit row
         count in the question always wins over both paths."""
-        if has_explicit_row_count(self._original_question):
+        if has_explicit_row_count(self._original_question,
+                                  _csv_terms(settings.AGENTIC_ROW_COUNT_KEYWORDS)):
             return sql
         if not is_listing_question(self._original_question,
                                    _csv_terms(settings.AGENTIC_LISTING_KEYWORDS),
