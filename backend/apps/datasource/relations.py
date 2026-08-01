@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from apps.chat.task.apex_helpers import quote_ident
 from common.core.config import settings
 from common.utils.utils import SQLBotLogUtil
 
@@ -399,10 +400,14 @@ def _referenced_table(column: str, table_names: Sequence[str]) -> Optional[str]:
 
 
 def _quote(ident: str, ds) -> str:
-    t = (getattr(ds, "type", "") or "").lower()
-    if t in ("mysql", "doris", "starrocks", "mariadb"):
-        return "`" + ident.replace("`", "``") + "`"
-    return '"' + ident.replace('"', '""') + '"'
+    """Delegates to the canonical implementation.
+
+    This module used to carry its own copy that knew about backtick dialects but
+    NOT bracket dialects, so SQL Server identifiers came out double-quoted here
+    and bracketed everywhere else -- even though this same module branches on
+    sqlserver/mssql elsewhere (AUDIT H-19).
+    """
+    return quote_ident(ident, getattr(ds, "type", "") or "")
 
 
 def _qualified(schema: str, table: str, ds) -> str:

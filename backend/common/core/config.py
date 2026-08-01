@@ -277,6 +277,13 @@ class Settings(BaseSettings):
     # ~40%", so batches ran ~38% over budget (AUDIT H-08). The caps below were
     # literals in the hottest, most expensive stage of the pipeline and could
     # not be tuned without a rebuild (AUDIT H-09).
+    # Model-facing error text was truncated by a bare [:1500] in four places
+    # (AUDIT H-11).
+    LLM_ERROR_TEXT_MAX_CHARS: int = 1500
+    # Asia/Shanghai is baked into the image, so every datetime.now() -- including
+    # the prompt's {current_time} slot -- is CST regardless of tenant (H-17).
+    # Empty keeps the container's local time, i.e. today's behaviour exactly.
+    PROMPT_TIMEZONE: str = ""
     APEX_CHARS_PER_TOKEN: float = 2.9
     APEX_MAX_PROBE_TABLES: int = 8
     APEX_MAX_PROBES: int = 8

@@ -74,6 +74,26 @@ warnings.filterwarnings("ignore")
 
 executor = ThreadPoolExecutor(max_workers=settings.LLM_EXECUTOR_MAX_WORKERS)
 
+
+def current_prompt_time(tz_name: str | None = None) -> str:
+    """The {current_time} prompt slot, in the configured timezone.
+
+    The image pins Asia/Shanghai, so `datetime.now()` answered every temporal
+    question in CST for every tenant (AUDIT H-17). An unset or unknown zone
+    falls back to container-local time -- a typo must not take down question
+    answering.
+    """
+    name = settings.PROMPT_TIMEZONE if tz_name is None else tz_name
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(name)).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            SQLBotLogUtil.warning(
+                f"PROMPT_TIMEZONE={name!r} is not a known timezone; "
+                f"falling back to container-local time")
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 dynamic_ds_types = [1, 3]
 dynamic_subsql_prefix = 'select * from sqlbot_dynamic_temp_table_'
 
@@ -951,7 +971,7 @@ class LLMService:
         try:
             base = list(self.sql_message) + [
                 HumanMessage(self.chat_question.sql_user_question(
-                    current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    current_time=current_prompt_time(),
                     change_title=False)),
                 HumanMessage(self.chat_question.alt_candidate_hint()),
             ]
@@ -1206,7 +1226,7 @@ class LLMService:
                 if feedback is None:
                     self.sql_message.append(HumanMessage(
                         self.chat_question.sql_user_question(
-                            current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), change_title=False)))
+                            current_time=current_prompt_time(), change_title=False)))
                 else:
                     self.sql_message.append(HumanMessage(
                         self.chat_question.sql_retry_user_question(
@@ -1232,7 +1252,7 @@ class LLMService:
                 try:
                     result = self.execute_sql(sql=leg_sql)
                 except Exception as e:
-                    feedback = format_retry_feedback('execute', str(e)[:1500], leg_sql)
+                    feedback = format_retry_feedback('execute', str(e)[:settings.LLM_ERROR_TEXT_MAX_CHARS], leg_sql)
                     continue
                 # FANOUT completeness: an empty result is often a value-format
                 # mismatch across files (the same category value stored with a
@@ -2547,7 +2567,7 @@ class LLMService:
                                                         agentic_e.sql)
                     elif isinstance(agentic_e, SQLBotDBError):
                         _retryable = True
-                        _stage, _detail = 'execute', str(agentic_e)[:1500]
+                        _stage, _detail = 'execute', str(agentic_e)[:settings.LLM_ERROR_TEXT_MAX_CHARS]
                         _failed_sql = locals().get('real_execute_sql') or locals().get('sql')
                     elif isinstance(agentic_e, SingleMessageError) and is_retryable_single_message(str(agentic_e)):
                         _retryable = True
@@ -2557,12 +2577,12 @@ class LLMService:
                             # Give it the specific "answer anyway" nudge, and only
                             # once -- a model that refuses twice is surfaced.
                             _stage = 'refusal'
-                            _detail = strip_refusal_tag(str(agentic_e))[:1500]
+                            _detail = strip_refusal_tag(str(agentic_e))[:settings.LLM_ERROR_TEXT_MAX_CHARS]
                             if refusal_retried:
                                 _retryable = False
                             refusal_retried = True
                         else:
-                            _stage, _detail = 'parse', str(agentic_e)[:1500]
+                            _stage, _detail = 'parse', str(agentic_e)[:settings.LLM_ERROR_TEXT_MAX_CHARS]
                     else:
                         _retryable = False
                     # The refusal tag is an internal marker; a refusal that ends up

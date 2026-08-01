@@ -1,6 +1,8 @@
 
 
 import asyncio
+from pathlib import Path
+import json
 # fastapi.HTTPException, NOT http.client.HTTPException: the latter is a plain
 # Exception subclass that ignores the status argument, so every guard below fell
 # through to the global handler and returned 500 instead of its intended 4xx --
@@ -286,12 +288,48 @@ def validate_workspace(value: str) -> CellValidator:
     return CellValidator(True, value, None)
 def validate_role(value: str) -> CellValidator:
     return CellValidator(True, value, None)
+def _accepted_values(*i18n_keys: str) -> set[str]:
+    """Every localisation of these keys, across all shipped locale files.
+
+    The import template is generated with `trans(...)`, so an English admin
+    downloads a sheet containing "Enabled" -- while these validators compared
+    the cell against the literal '已启用' and failed every row (AUDIT H-16).
+    The validators are module-level and have no request context, so rather than
+    thread the request-scoped translator through, accept the value in ANY
+    shipped locale. That also keeps templates downloaded before this fix valid.
+    """
+    values: set[str] = set()
+    locales_dir = Path(__file__).resolve().parents[3] / "locales"
+    for f in sorted(locales_dir.glob("*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in i18n_keys:
+            node = data
+            for part in key.split("."):
+                node = node.get(part) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if isinstance(node, str) and node.strip():
+                values.add(node.strip())
+    return values
+
+
+# Computed once at import; the literals are the pre-i18n behaviour and stay as
+# a floor in case a locale file is ever missing or unreadable.
+_STATUS_ENABLED = _accepted_values("i18n_user.status_enabled") | {"已启用"}
+_STATUS_DISABLED = _accepted_values("i18n_user.status_disabled") | {"已禁用"}
+_ORIGIN_LOCAL = _accepted_values("i18n_user.local_creation") | {"本地创建"}
+
+
 def validate_status(value: str) -> CellValidator:
-    if value == '已启用': return CellValidator(True, 1, None)
-    if value == '已禁用': return CellValidator(True, 0, None)
+    v = (value or "").strip()
+    if v in _STATUS_ENABLED: return CellValidator(True, 1, None)
+    if v in _STATUS_DISABLED: return CellValidator(True, 0, None)
     return CellValidator(False, None, "状态只能是已启用或已禁用")
 def validate_origin(value: str) -> CellValidator:
-    if value == '本地创建': return CellValidator(True, 0, None)
+    if (value or "").strip() in _ORIGIN_LOCAL: return CellValidator(True, 0, None)
     return CellValidator(False, None, "不支持当前来源")
 def validate_platform_id(value: str) -> CellValidator:
     return CellValidator(True, value, None)
