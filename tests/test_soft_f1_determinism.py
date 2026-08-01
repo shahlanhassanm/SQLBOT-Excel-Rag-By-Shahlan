@@ -145,3 +145,68 @@ def test_duplicate_rows_are_still_deduplicated():
 
 def test_empty_prediction_scores_zero():
     assert f1([], [("a", 1)]) == 0.0
+
+
+# ===========================================================================
+# GROUP A — benchmark provenance and metric consistency (E-06, E-08, E-09).
+# ===========================================================================
+
+def test_tolerant_f1_pairs_with_tolerant_ex():
+    """E-09: a record could score ex_tol=1 and f1=0 at once, because EX-tolerant
+    rounds floats to 6dp while official Soft-F1 uses exact membership. The
+    tolerant pair must agree."""
+    import decimal
+    gold = [(decimal.Decimal("0.904908"),)]
+    pred = [(0.9049079754601227,)]
+    assert bird.calculate_ex_tolerant(pred, gold) == 1
+    assert bird.calculate_f1_score(pred, gold) == 0.0        # official, unchanged
+    assert bird.calculate_f1_tolerant(pred, gold) == 1.0     # tolerant pair
+
+
+def test_official_f1_is_not_altered_by_the_tolerant_variant():
+    """Comparability with published BIRD Soft-F1 must survive."""
+    gold = [("a", 1), ("b", 2)]
+    assert bird.calculate_f1_score(gold, gold) == 1.0
+    assert bird.calculate_f1_score([("x", 9)], gold) == 0.0
+
+
+def test_tolerant_f1_is_also_order_invariant():
+    gold = [("a", 1), ("b", 2), ("c", 3)]
+    assert bird.calculate_f1_tolerant(list(reversed(gold)), gold) == 1.0
+
+
+def test_run_tag_is_stable_for_the_same_configuration():
+    """E-08: the tag identifies a (model, mode, flags) combination."""
+    import argparse
+    a = argparse.Namespace(mode="pipeline", finish="data", descriptions=False, out="/x")
+    b = argparse.Namespace(mode="pipeline", finish="data", descriptions=False, out="/y")
+    p1 = bird.run_provenance(a, "m1")
+    p2 = bird.run_provenance(b, "m1")
+    assert bird.run_tag(p1) == bird.run_tag(p2), "--out must not affect the tag"
+
+
+def test_run_tag_changes_when_a_flag_changes():
+    import argparse
+    a = argparse.Namespace(mode="pipeline", finish="sql", descriptions=False, out="/x")
+    b = argparse.Namespace(mode="pipeline", finish="data", descriptions=False, out="/x")
+    assert bird.run_tag(bird.run_provenance(a, "m")) != \
+           bird.run_tag(bird.run_provenance(b, "m"))
+
+
+def test_run_tag_changes_when_the_model_changes():
+    import argparse
+    a = argparse.Namespace(mode="pipeline", finish="data", out="/x")
+    assert bird.run_tag(bird.run_provenance(a, "model-A")) != \
+           bird.run_tag(bird.run_provenance(a, "model-B"))
+
+
+def test_provenance_records_what_is_needed_to_reproduce():
+    """E-06: results files carried no model, flags, commit or timestamp - which
+    is how two byte-identical files ended up under different names (D-22)."""
+    import argparse
+    prov = bird.run_provenance(
+        argparse.Namespace(mode="model", descriptions=True, out="/x"), "qwen")
+    for key in ("model", "mode", "flags", "git_commit", "git_dirty", "bank", "utc"):
+        assert key in prov, f"provenance missing {key}"
+    assert prov["model"] == "qwen"
+    assert "out" not in prov["flags"], "output path must not be part of identity"

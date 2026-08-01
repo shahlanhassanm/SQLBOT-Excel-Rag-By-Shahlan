@@ -74,7 +74,7 @@ def calculate_ex(predicted_res, ground_truth_res) -> int:
     return 1 if set(predicted_res) == set(ground_truth_res) else 0
 
 
-def _norm_cell(v):
+def _norm_cell(v: object) -> object:
     """Collapse the differences BIRD's strict EX punishes but nobody means.
 
     The gold queries cast with `AS REAL` (float4, ~6 significant digits) while a
@@ -131,6 +131,24 @@ def _row_sort_key(row: tuple[object, ...]) -> tuple[tuple[bool, str, str], ...]:
     type coercion, so it cannot change any value the metric then compares.
     """
     return tuple((v is None, type(v).__name__, str(v)) for v in row)
+
+
+def calculate_f1_tolerant(predicted: list[tuple[object, ...]],
+                          ground_truth: list[tuple[object, ...]]) -> float:
+    """Soft-F1 over _norm_cell-normalised rows.
+
+    The official metric uses exact `in` membership, so a record can score
+    ex_tol=1 (EX-tolerant rounds floats to 6dp) and f1=0 simultaneously — the
+    two metrics disagreeing about the same rows (AUDIT E-09). This pairs the
+    tolerant EX with a tolerant F1 so (ex, f1) and (ex_tol, f1_tol) are each
+    internally consistent.
+
+    The official calculate_f1_score is deliberately left unchanged so published
+    Soft-F1 stays comparable.
+    """
+    p = [tuple(_norm_cell(c) for c in row) for row in predicted]
+    g = [tuple(_norm_cell(c) for c in row) for row in ground_truth]
+    return calculate_f1_score(p, g)
 
 
 def calculate_f1_score(predicted, ground_truth) -> float:
@@ -850,6 +868,47 @@ def ask_pipeline(entry: dict, ds_id: int, finish: str = "sql") -> tuple[str, str
         return sql, (res.get("message") or "")[:200]
 
 
+def run_provenance(args: argparse.Namespace, model: str) -> dict[str, object]:
+    """Everything needed to reproduce a run.
+
+    A results file used to be a bare list of per-question records with no record
+    of which model, which flags or which code produced it — which is how two
+    byte-identical result files ended up under different names (AUDIT E-06/D-22).
+    """
+    import datetime as _dt
+    import subprocess as _sp
+
+    def _git(*a: str) -> str:
+        try:
+            return _sp.run(("git",) + a, cwd=os.path.dirname(os.path.abspath(__file__)),
+                           capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return ""
+
+    flags = {k: v for k, v in sorted(vars(args).items()) if k not in ("out",)}
+    return {
+        "model": model,
+        "mode": args.mode,
+        "flags": flags,
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "bank": BANK,
+        "utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def run_tag(prov: dict[str, object]) -> str:
+    """Short stable id for a (model, mode, flags) combination.
+
+    Stamped on every record so a resumed run that changed a flag is detectable
+    rather than silently blended into one file (AUDIT E-08).
+    """
+    import hashlib as _h
+    payload = json.dumps({k: prov[k] for k in ("model", "mode", "flags")},
+                         sort_keys=True, default=str)
+    return _h.sha256(payload.encode()).hexdigest()[:12]
+
+
 def stratified_sample(bank: list, n: int) -> list:
     """N questions spread evenly over (db_id, difficulty), deterministic.
 
@@ -884,6 +943,10 @@ def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", default="")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--allow-mixed", action="store_true",
+                    help="permit --resume into a file written under a different "
+                         "configuration (E-08); off by default because the mix "
+                         "is invisible in the results")
     # 300s was too tight while the model was still cold: q12/q27/q366 timed out
     # in the first run and were scored as failures.
     ap.add_argument("--timeout", type=int, default=900)
@@ -949,10 +1012,23 @@ def main():
 
     results = []
     done = set()
+    _prov = run_provenance(args, model)
+    _tag = run_tag(_prov)
     if args.resume and os.path.exists(out_path):
         results = json.load(open(out_path))
         done = {r["question_id"] for r in results}
         print(f"[resume] {len(done)} already scored in {out_path}")
+        # E-08: refuse to blend records produced under a different configuration
+        prior = {r.get("run_tag") for r in results if r.get("run_tag")}
+        mismatched = prior - {_tag}
+        if mismatched:
+            print(f"[resume] REFUSING: {out_path} holds records from a different "
+                  f"configuration (tags {sorted(mismatched)}, this run {_tag}).\n"
+                  f"          Resuming would silently mix configurations in one "
+                  f"file. Use a new --out, or --allow-mixed to override.",
+                  flush=True)
+            if not args.allow_mixed:
+                sys.exit(2)
 
     ds_map = {}
     if args.mode == "pipeline":
@@ -1020,6 +1096,7 @@ def main():
                     rec["ex"] = calculate_ex(pred, gold)
                     rec["ex_tol"] = calculate_ex_tolerant(pred, gold)
                     rec["f1"] = round(calculate_f1_score(pred, gold), 4)
+                    rec["f1_tol"] = round(calculate_f1_tolerant(pred, gold), 4)
                     rec["status"] = ("CORRECT" if rec["ex"]
                                      else "NEAR" if rec["ex_tol"] else "WRONG")
                     rec["detail"] = f"pred_rows={len(pred)} gold_rows={len(gold)}"
@@ -1027,8 +1104,14 @@ def main():
             rec["detail"] = f"{type(e).__name__}: {str(e)[:200]}"
 
         rec["seconds"] = round(time.time() - t0, 1)
+        rec["run_tag"] = _tag
         results.append(rec)
+        # The results file stays a bare LIST for backward compatibility with
+        # bird_analyze.py / bird_diff.py / bird_significance.py / rescore.py;
+        # full provenance goes in a sidecar (AUDIT E-06).
         json.dump(results, open(out_path, "w"), indent=1, default=str)
+        json.dump({**_prov, "run_tag": _tag, "questions_scored": len(results)},
+                  open(out_path + ".meta.json", "w"), indent=1, default=str)
 
         n = len(results)
         ex_so_far = 100 * sum(r["ex"] for r in results) / n
@@ -1050,6 +1133,7 @@ def report(results, out_path, mode):
     ex = sum(r["ex"] for r in results)
     ex_tol = sum(r.get("ex_tol", 0) for r in results)
     f1 = sum(r["f1"] for r in results)
+    f1_tol = sum(r.get("f1_tol", r["f1"]) for r in results)
 
     print(f"\n==== BIRD Mini-Dev (150-subset) -- mode={mode} ====")
     print(f"  questions      : {n}")
@@ -1057,6 +1141,8 @@ def report(results, out_path, mode):
     print(f"  EX (tolerant)  : {ex_tol}/{n} = {100*ex_tol/n:.1f}%   "
           f"(+{ex_tol-ex} float/type-only misses)")
     print(f"  Soft-F1        : {100*f1/n:.1f}%")
+    print(f"  Soft-F1 (tol)  : {100*f1_tol/n:.1f}%   "
+          f"(paired with EX-tolerant; see AUDIT E-09)")
 
     print("\n  by difficulty:")
     for d in ("simple", "moderate", "challenging"):

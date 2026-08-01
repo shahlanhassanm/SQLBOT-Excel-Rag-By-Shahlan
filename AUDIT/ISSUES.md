@@ -29,7 +29,8 @@ One row per item. Detail lives in the phase document named in the last column.
 | **L-A** | ✅ **FIXED + BENCHMARKED** | `0026e3d` `34886ee` | +15 |
 | **D-06** | ✅ **FIXED** | `40cb518` | +21 |
 | **D-38** *(new)* | ✅ **FIXED** | `d7dbb80` | +43 |
-| **D-10** | ✅ **FIXED** | *(pending)* | +12 |
+| **D-10** / **E-01** | ✅ **FIXED** | `3b6717b` | +12 |
+| **GROUP A** — E-06, E-08, E-09 | ✅ **FIXED** | *(pending)* | +7 |
 | **D-39** *(new)* | **WONTFIX — architectural** (cycle passes through closed-source `sqlbot_xpack`) | — | — |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
