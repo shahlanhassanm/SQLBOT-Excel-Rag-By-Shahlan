@@ -93,8 +93,24 @@ def collect_row_filters(session: SessionDep, current_user: CurrentUser, ds: Core
     return out
 
 
-def is_normal_user(current_user: CurrentUser):
-    return current_user.id != 1
+def is_normal_user(current_user: CurrentUser) -> bool:
+    """True when this caller IS subject to row and column permissions.
+
+    Was `current_user.id != 1`, so the permission layer answered "is this caller
+    privileged?" with an id comparison while the rest of the system used
+    `isAdmin` -- a fourth definition of privileged in a codebase that already
+    had three (AUDIT D-05/D-37). Anything holding id 1 got a full bypass,
+    including DTOs built by internal services that never set isAdmin.
+
+    `isAdmin` is assigned as `id == 1 and account == 'admin'` (see
+    `system/crud/user.py` and `mcp.py`), a strict SUBSET of `id == 1`, so this
+    can only tighten: the genuine administrator still bypasses, and everything
+    that merely held id 1 no longer does.
+
+    `getattr` with a False default so an object without the attribute is treated
+    as NOT privileged -- failing open here would reintroduce the bypass.
+    """
+    return not getattr(current_user, 'isAdmin', False)
 
 
 def filter_list(list_a, list_b):

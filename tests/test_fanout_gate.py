@@ -28,9 +28,14 @@ from apps.datasource.models.datasource import CoreDatasource
 
 
 class _User:
-    def __init__(self, user_id, oid=1):
+    def __init__(self, user_id, oid=1, is_admin=False):
         self.id = user_id
         self.oid = oid
+        # D-37 retargeted the permission predicate from `id != 1` to `isAdmin`.
+        # The fanout gate deliberately does NOT consult either -- it asks whether
+        # row filters actually apply -- so this exists only for the predicate
+        # test below.
+        self.isAdmin = is_admin
 
 
 def _svc(user, ds):
@@ -105,7 +110,15 @@ def test_no_readable_tables_is_not_restricted(monkeypatch, ds):
 
 # --- the global predicate must be untouched (option 2 not approved) --------
 
-def test_is_normal_user_predicate_is_unchanged():
+def test_is_normal_user_predicate_keys_on_admin_not_id():
+    """Superseded by D-37. This test previously pinned `id != 1`, because D-05
+    option 1 deliberately left the predicate alone and fixed only the fanout
+    gate. Option 2 has since landed: the permission layer now uses `isAdmin`,
+    the same notion of privileged the rest of the system uses.
+
+    The change can only tighten -- `isAdmin` is `id == 1 and account == 'admin'`,
+    a strict subset of `id == 1`."""
     from apps.datasource.crud.permission import is_normal_user
-    assert is_normal_user(_User(1)) is False
+    assert is_normal_user(_User(1, is_admin=True)) is False    # the real admin
+    assert is_normal_user(_User(1, is_admin=False)) is True    # id 1, not admin
     assert is_normal_user(_User(2)) is True
