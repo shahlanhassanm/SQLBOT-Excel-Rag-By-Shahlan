@@ -432,3 +432,48 @@ Compare **full-run vs full-run** against `bird_pipeline_gptoss_150.json`
 D-37 provably cannot move these numbers: `bird_eval` builds
 `UserInfoDTO(id=1, isAdmin=True)`, which bypassed the permission gate before and
 bypasses it now — pinned by `test_benchmark_principal_is_unaffected`.
+
+---
+
+# Second pass (2026-08-01, later): every register row now has a disposition
+
+`AUDIT/ISSUES.md` has **0 OPEN rows**. Additional work after the Groups A–G batch:
+
+| ID | What happened |
+|---|---|
+| **D-19** | **FIXED** — repo-root discovery walks up for a marker. Suite went 585 passed / **24 failed** → 585 passed / **0 failed**. From a full checkout all 24 run and pass; in the runtime container (no `frontend/`) they skip with a reason. |
+| **D-37 / D-05** | **FIXED** — `is_normal_user()` now keys on `isAdmin`, not `id != 1`. Construction-site audit done; `isAdmin` is a strict subset of `id == 1`, so it can only tighten. The benchmark harnesses already passed `isAdmin=True`, so benchmark behaviour is unchanged. |
+| **E-03 / L-B / L-C** | Harness and product identifier checks made comparable — and the harness turned out to be **better**, so the fix went the other way: `owners_hint()` was ported INTO `sql_validate` and wired into the agentic retry path. |
+| **E-12** | **FIXED** — timeouts get their own status and an "EX excluding timeouts" line. |
+| **C-03 / C-04 / C-05 / C-06** | **FIXED** — `auth.py` and `db.py` had zero tests; both now covered. |
+| **Q-18** | **ANSWERED** — both two-step JWT decodes are deliberate and correct. The source comment claiming embedded tokens were unverified was **stale**; corrected, with tests pinning both verified second decodes. |
+| **C-07** *(new)* | `test_row_rag_e2e` is **flaky** on a cold embedding model. The audit's "zero flaky tests" claim was wrong. Documented, not silenced. |
+
+Not implemented, by instruction or because they are not code problems:
+`D-11`/`E-02` (official BIRD metric compatibility), `D-39`, `Q-01`–`Q-17`,
+`H-04`, `H-05`, `H-07`, `H-18`, `E-10` (needs 55 gold queries that do not exist),
+`E-11`, `D-22`.
+
+## Benchmarks running (started 13:08 UTC 2026-08-01)
+
+```
+/tmp/claude-1001/.../scratchpad/run_bird_both.sh     # nohup'd, PID in run_bird_both.out
+  leg 1 -> /tmp/bird_gptoss_post.json     gpt-oss:20b            ~7 h
+  leg 2 -> /tmp/bird_qwen20k_post.json    qwen2.5-coder:32b-20k  ~8 h
+```
+
+Both `--mode pipeline --finish data --timeout 900`, resumable. Progress:
+
+```bash
+docker exec sqlbot python3 -c "import json;d=json.load(open('/tmp/bird_gptoss_post.json'));\
+ok=sum(1 for r in d if r.get('status')=='CORRECT');print(len(d),'/150',f'{100*ok/len(d):.1f}%')"
+```
+
+**Two traps hit while starting these:** a stale results file survived `rm -f`
+and the harness silently `--resume`d onto 37 pre-fix records — always verify the
+file is gone, since mixing pre- and post-fix records invalidates the comparison.
+And the first ~4 minutes of a run show no log growth: that is the model reload
+after switching models, not a hang.
+
+Compare **full-run vs full-run** against `bird_pipeline_gptoss_150.json` (37.3 %)
+and `bird_32b20k_150.json` (35.3 %) with `bird_significance.py`.
