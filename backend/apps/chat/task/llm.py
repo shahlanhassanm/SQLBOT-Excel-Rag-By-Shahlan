@@ -8,7 +8,6 @@ import urllib.parse
 import warnings
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime
-from dis import specialized
 from typing import Any, List, Optional, Union, Dict, Iterator
 
 import orjson

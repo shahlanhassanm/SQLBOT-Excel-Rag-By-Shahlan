@@ -1,10 +1,8 @@
 # Author: Junjun
 # Date: 2025/5/19
 import urllib.parse
-from typing import List
 
-from sqlalchemy import create_engine, text, MetaData, Table
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine
 
 from apps.datasource.models.datasource import DatasourceConf
 from common.core.config import settings
@@ -27,45 +25,3 @@ def get_engine_conn():
                            connect_args={"options": f"-c search_path={conf.dbSchema}", "connect_timeout": conf.timeout},
                            pool_timeout=conf.timeout)
     return engine
-
-
-def get_data_engine():
-    engine = get_engine_conn()
-    session_maker = sessionmaker(bind=engine)
-    session = session_maker()
-    return session
-
-
-def create_table(session, table_name: str, fields: List[any]):
-    # field type relation
-    list = []
-    for f in fields:
-        if "object" in f["type"]:
-            f["relType"] = "text"
-        elif "int" in f["type"]:
-            f["relType"] = "bigint"
-        elif "float" in f["type"]:
-            f["relType"] = "numeric"
-        elif "datetime" in f["type"]:
-            f["relType"] = "timestamp"
-        else:
-            f["relType"] = "text"
-        list.append(f'"{f["name"]}" {f["relType"]}')
-
-    sql = f"""
-            CREATE TABLE "{table_name}" (
-                {", ".join(list)}
-            );
-            """
-    session.execute(text(sql))
-    session.commit()
-
-
-def insert_data(session, table_name: str, fields: List[any], data: List[any]):
-    engine = get_engine_conn()
-    metadata = MetaData()
-    table = Table(table_name, metadata, autoload_with=engine)
-    with engine.connect() as conn:
-        stmt = table.insert().values(data)
-        conn.execute(stmt)
-        conn.commit()

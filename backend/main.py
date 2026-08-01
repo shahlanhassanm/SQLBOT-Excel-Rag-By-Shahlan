@@ -184,7 +184,12 @@ mcp = FastApiMCP(
     description="SQLBot MCP Server",
     describe_all_responses=True,
     describe_full_response_schema=True,
-    include_operations=["mcp_datasource_list", "get_model_list", "mcp_question", "mcp_start", "mcp_assistant", "mcp_ws_list"]
+    # Only operations with a LIVE route may be advertised: an MCP client that
+    # sees a tool it cannot call has no way to tell that from a server fault.
+    # `get_model_list` was listed here while its route stayed commented out
+    # in apps/mcp/mcp.py (AUDIT D-29).
+    include_operations=["mcp_datasource_list", "mcp_question", "mcp_start",
+                        "mcp_assistant", "mcp_ws_list"]
 )
 
 mcp.mount(mcp_app)
