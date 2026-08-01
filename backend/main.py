@@ -22,7 +22,7 @@ from apps.system.crud.assistant import init_dynamic_cors
 from apps.system.middleware.auth import TokenMiddleware
 from apps.system.schemas.permission import RequestContextMiddleware
 from common.audit.schemas.request_context import RequestContextMiddlewareCommon
-from common.core.config import settings
+from common.core.config import settings, validate_settings, collect_config_warnings
 from common.core.response_middleware import ResponseMiddleware, exception_handler
 from common.core.sqlbot_cache import init_sqlbot_cache
 from common.utils.embedding_threads import fill_empty_terminology_embeddings, fill_empty_data_training_embeddings, \
@@ -49,6 +49,14 @@ def init_table_and_ds_embedding():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Refuse to start on a configuration that cannot work, BEFORE migrations or
+    # the cache are touched -- init_sqlbot_cache() is exactly where an empty
+    # CACHE_REDIS_URL used to fall back to localhost and fail silently
+    # (AUDIT H-01/H-02/H-03).
+    validate_settings()
+    for _warning in collect_config_warnings():
+        SQLBotLogUtil.warning(f"configuration: {_warning}")
+
     run_migrations()
     init_sqlbot_cache()
     init_dynamic_cors(app)

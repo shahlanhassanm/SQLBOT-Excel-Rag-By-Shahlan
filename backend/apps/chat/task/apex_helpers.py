@@ -23,6 +23,8 @@ table/column name, and rebuild a syntactically identical schema string.
 from __future__ import annotations
 
 import json
+
+from common.core.config import settings
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -175,13 +177,13 @@ def schema_to_table_blocks(parsed: Dict[str, Any]) -> List[Tuple[str, str]]:
 
 
 def batch_tables_by_token_budget(parsed: Dict[str, Any], approx_tokens_per_batch: int = 10_000) -> List[Dict[str, Any]]:
-    """Split tables into batches that fit a rough token budget (4 chars ≈ 1 token).
+    """Split tables into batches that fit a rough token budget (APEX_CHARS_PER_TOKEN chars ≈ 1 token; measured 2.9 on this workload).
 
     Tables with identical column signatures are merged into one entry whose
     header lists every matching table name — this is the paper's Schema Merging
     optimisation. A merged group is treated as a single batch unit.
     """
-    char_budget = approx_tokens_per_batch * 4
+    char_budget = int(approx_tokens_per_batch * settings.APEX_CHARS_PER_TOKEN)
 
     # 1) Group identical-signature tables together.
     signature_groups: Dict[str, List[Dict[str, Any]]] = {}

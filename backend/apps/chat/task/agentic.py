@@ -404,10 +404,23 @@ def is_retryable_single_message(msg: str) -> bool:
 _TRAILING_LIMIT_RE = re.compile(r'(?is)\blimit\s+(\d+)\s*(offset\s+\d+\s*)?$')
 
 
-def raise_sql_limit(sql: str, target: int = 1000) -> str:
+DEFAULT_FULL_RESULT_LIMIT = 1000
+
+
+def raise_sql_limit(sql: str, target: int | None = None) -> str:
     """If ``sql`` ends with ``LIMIT n`` (optionally ``OFFSET m``) and n < target,
     rewrite it to ``LIMIT target``. Leaves inner/subquery limits untouched and
-    leaves SQL without a trailing limit unchanged."""
+    leaves SQL without a trailing limit unchanged.
+
+    ``target`` defaults to DEFAULT_FULL_RESULT_LIMIT. This module is
+    deliberately settings-free (see the module docstring), so the value is a
+    named constant here rather than a `settings` read; the sole production
+    caller passes ``settings.AGENTIC_FULL_RESULT_LIMIT`` explicitly, and a test
+    asserts the two never drift apart. That is what AUDIT H-12 asked for --
+    1000 appeared as an unlinked literal in three places.
+    """
+    if target is None:
+        target = DEFAULT_FULL_RESULT_LIMIT
     if not sql or not sql.strip():
         return sql
     s = sql.rstrip()

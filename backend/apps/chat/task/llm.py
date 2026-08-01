@@ -1335,7 +1335,7 @@ class LLMService:
                 text, _, _ = self._invoke_llm_blocking(msgs)
                 return text.strip()
 
-            with ThreadPoolExecutor(max_workers=2) as ex:
+            with ThreadPoolExecutor(max_workers=settings.APEX_MAX_WORKERS) as ex:
                 futures = [ex.submit(_sample_one) for _ in range(2)]
                 candidates = [f.result() for f in futures]
             candidates = [c for c in candidates if c]
@@ -1394,7 +1394,7 @@ class LLMService:
 
         Skips when:
           - logical_plan is empty (we have no reasoning anchor)
-          - schema is small (<= 12 columns total) — pruning offers no benefit
+          - schema is small (<= APEX_MIN_COLUMNS_TO_PRUNE columns) — pruning offers no benefit
           - the LLM call fails — we keep the original schema rather than risk a
             bad prune dropping critical columns.
         """
@@ -1412,7 +1412,7 @@ class LLMService:
         try:
             parsed = parse_schema(self.chat_question.db_schema)
             total_cols = sum(len(t.get('columns', [])) for t in parsed.get('tables', []))
-            if total_cols <= 12:
+            if total_cols <= settings.APEX_MIN_COLUMNS_TO_PRUNE:
                 SQLBotLogUtil.info(f"Dual-pathway pruning skipped: schema too small ({total_cols} cols).")
                 return
 
@@ -1451,7 +1451,7 @@ class LLMService:
                     text, _, _ = self._invoke_llm_blocking(msgs)
                     return safe_json_loads(text)
 
-                with ThreadPoolExecutor(max_workers=2) as ex:
+                with ThreadPoolExecutor(max_workers=settings.APEX_MAX_WORKERS) as ex:
                     f_neg = ex.submit(_pass_negative)
                     f_pos = ex.submit(_pass_positive)
                     neg_obj = f_neg.result() or {}
@@ -1539,7 +1539,7 @@ class LLMService:
                 return
 
             # Cap on how many tables we'll probe to bound cost/latency.
-            tables_to_probe = tables[:8]
+            tables_to_probe = tables[:settings.APEX_MAX_PROBE_TABLES]
             ds_type = getattr(self.ds, 'type', None) or ''
             db_id = parsed.get('db_id', '') or ''
 
@@ -1591,7 +1591,7 @@ class LLMService:
                 # in the observations sent downstream.
                 success_findings: List[str] = []
                 fail_count = 0
-                for p in probes[:8]:
+                for p in probes[:settings.APEX_MAX_PROBES]:
                     if not isinstance(p, dict):
                         continue
                     sql = (p.get('sql') or '').strip()
@@ -2580,7 +2580,7 @@ class LLMService:
                     # harvest the parallel alternative candidate, if one is cooking
                     if alt_future is not None:
                         try:
-                            _alt_text, _, _ = alt_future.result(timeout=60)
+                            _alt_text, _, _ = alt_future.result(timeout=settings.LLM_ALT_CANDIDATE_TIMEOUT)
                         except Exception:
                             _alt_text = ''
                         alt_future = None

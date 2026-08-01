@@ -7,7 +7,8 @@ from pydantic import (
     BeforeValidator,
     PostgresDsn,
     computed_field,
-    field_validator
+    field_validator,
+    model_validator
 )
 from pydantic_core import MultiHostUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str = secrets.token_urlsafe(32)
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
+    # Deployment posture. Only "production" turns the dev-origin CORS check
+    # into an error; everything else stays developer-friendly (AUDIT H-02).
+    ENVIRONMENT: Literal["local", "staging", "production"] = "local"
     FRONTEND_HOST: str = "http://localhost:5173"
 
     BACKEND_CORS_ORIGINS: Annotated[
@@ -43,9 +47,14 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def all_cors_origins(self) -> list[str]:
-        return [str(origin).rstrip("/") for origin in self.BACKEND_CORS_ORIGINS] + [
-            self.FRONTEND_HOST
-        ]
+        # De-duplicated, order preserved. FRONTEND_HOST is appended
+        # unconditionally, so listing it in BACKEND_CORS_ORIGINS too used to
+        # emit it twice (AUDIT H-02); `validate_settings` refuses a localhost
+        # origin when ENVIRONMENT=production.
+        origins = [str(origin).rstrip("/") for origin in self.BACKEND_CORS_ORIGINS]
+        if self.FRONTEND_HOST:
+            origins.append(self.FRONTEND_HOST.rstrip("/"))
+        return list(dict.fromkeys(origins))
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -263,6 +272,19 @@ class Settings(BaseSettings):
     # STORAGE guard and is deliberately independent of enable_sql_row_limit,
     # which governs whether generated SQL carries a LIMIT (AUDIT D-16).
     AGENTIC_PERSISTED_ROW_CAP: int = 1000
+    # APEX pruning. apex_helpers assumed 4 chars/token; llm.py measured 2.9 on
+    # this workload and its own comment notes 4 "understated the true size by
+    # ~40%", so batches ran ~38% over budget (AUDIT H-08). The caps below were
+    # literals in the hottest, most expensive stage of the pipeline and could
+    # not be tuned without a rebuild (AUDIT H-09).
+    APEX_CHARS_PER_TOKEN: float = 2.9
+    APEX_MAX_PROBE_TABLES: int = 8
+    APEX_MAX_PROBES: int = 8
+    APEX_MIN_COLUMNS_TO_PRUNE: int = 12
+    APEX_MAX_WORKERS: int = 2
+    # A single call takes 30-120 s on the reference hardware, so a 60 s cap
+    # paid for the alternate candidate and then discarded it (AUDIT H-10).
+    LLM_ALT_CANDIDATE_TIMEOUT: int = 180
     AGENTIC_ROW_COUNT_KEYWORDS: str = (
         'top,first,last,limit,bottom,head,'
         'record,records,row,rows,result,results,item,items,entry,entries,'
@@ -348,6 +370,30 @@ class Settings(BaseSettings):
 
     ORACLE_CLIENT_PATH: str = '/opt/sqlbot/db_client/oracle_instant_client'
 
+    @model_validator(mode="after")
+    def _propagate_embedding_defaults(self) -> "Settings":
+        """Move the children when the parent knob moves.
+
+        `EMBEDDING_TERMINOLOGY_SIMILARITY: float = EMBEDDING_DEFAULT_SIMILARITY`
+        binds the class-body VALUE at definition time, so overriding
+        EMBEDDING_DEFAULT_SIMILARITY in the environment moved nothing and the
+        operator had to find and set all three (AUDIT H-06). `model_fields_set`
+        holds only the fields explicitly supplied, so a deliberately-set child
+        still wins.
+        """
+        for parent, children in (
+            ("EMBEDDING_DEFAULT_SIMILARITY",
+             ("EMBEDDING_TERMINOLOGY_SIMILARITY", "EMBEDDING_DATA_TRAINING_SIMILARITY")),
+            ("EMBEDDING_DEFAULT_TOP_COUNT",
+             ("EMBEDDING_TERMINOLOGY_TOP_COUNT", "EMBEDDING_DATA_TRAINING_TOP_COUNT")),
+        ):
+            if parent not in self.model_fields_set:
+                continue
+            for child in children:
+                if child not in self.model_fields_set:
+                    object.__setattr__(self, child, getattr(self, parent))
+        return self
+
     @field_validator('SQL_DEBUG',
                      'EMBEDDING_ENABLED',
                      'GENERATE_SQL_QUERY_LIMIT_ENABLED',
@@ -386,3 +432,66 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore
+
+
+class ConfigurationError(RuntimeError):
+    """A setting combination that cannot work. Raised at startup, never later.
+
+    Every case here previously produced a system that *ran* and was silently
+    wrong -- an unreachable cache, an unresolvable image URL, a dev origin
+    accepted in production. Failing at boot is the whole point (AUDIT H-01/02/03).
+    """
+
+
+def collect_config_warnings(s: "Settings | None" = None) -> list[str]:
+    """Non-fatal misconfigurations worth shouting about at startup."""
+    s = s or settings
+    warnings: list[str] = []
+
+    if "YOUR_SERVE_IP" in s.SERVER_IMAGE_HOST or "MCP_PORT" in s.SERVER_IMAGE_HOST:
+        warnings.append(
+            f"SERVER_IMAGE_HOST is still the placeholder {s.SERVER_IMAGE_HOST!r}: "
+            f"every MCP/API chart reply will return an unresolvable image URL. "
+            f"Set it to this server's externally reachable base URL.")
+
+    if s.ENVIRONMENT != "production" and s.POSTGRES_PASSWORD == "Password123@pg":
+        warnings.append(
+            "POSTGRES_PASSWORD is the shipped default; it is also baked into the "
+            "image as an ENV. Override it before exposing this deployment.")
+
+    return warnings
+
+
+def validate_settings(s: "Settings | None" = None) -> None:
+    """Fail fast on setting combinations that cannot work.
+
+    Called from main.py at import time so a misconfigured container dies at boot
+    with the reason, instead of serving traffic and misbehaving quietly.
+    """
+    s = s or settings
+    errors: list[str] = []
+
+    # H-03: an empty URL falls back to redis://localhost:6379/0, which inside a
+    # container is nothing at all -- the cache silently does not work.
+    if s.CACHE_TYPE == "redis" and not s.CACHE_REDIS_URL:
+        errors.append("CACHE_TYPE=redis requires CACHE_REDIS_URL to be set.")
+
+    # H-02: FRONTEND_HOST defaults to the Vite dev origin and is appended to
+    # all_cors_origins unconditionally.
+    if s.ENVIRONMENT == "production":
+        dev_origins = [o for o in s.all_cors_origins
+                       if "localhost" in o or "127.0.0.1" in o]
+        if dev_origins:
+            errors.append(
+                f"ENVIRONMENT=production permits development CORS origins "
+                f"{dev_origins}. Set FRONTEND_HOST (and BACKEND_CORS_ORIGINS) to "
+                f"the real front-end origin.")
+        if s.SECRET_KEY == "changethis":
+            errors.append("SECRET_KEY is still the placeholder value.")
+
+    if s.ROW_RAG_EMBED_DIM <= 0:
+        errors.append(f"ROW_RAG_EMBED_DIM must be positive, got {s.ROW_RAG_EMBED_DIM}.")
+
+    if errors:
+        raise ConfigurationError(
+            "Invalid configuration:\n  - " + "\n  - ".join(errors))
