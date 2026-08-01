@@ -1,4 +1,6 @@
 # backend/tests/test_row_rag_e2e.py
+import time
+
 import pandas as pd
 import pytest
 
@@ -45,9 +47,22 @@ def test_semantic_row_fallback_retrieves_sentinel_and_rejects_gibberish():
         # near-paraphrase of the sentinel -> the sentinel row should be the top hit
         # The allow-list is required since AUDIT D-01: row_embeddings is a global
         # store, so the search is scoped to the tables the caller may read.
-        hit = row_rag_fallback(eng, "origami dragon teaching calculus to penguins in a "
-                                    "floating library in antarctica", [table])
-        assert hit is not None, "sentinel should be retrievable"
+        # Retry once. The ingest step above is already guarded against a flaky
+        # embedding endpoint (skip on exception); retrieval was not, so a
+        # transient embed_query failure -- which row_rag_fallback logs and
+        # converts to None by design -- surfaced as a test failure rather than
+        # an environment problem. Measured in isolation this scores cosine
+        # 0.854 deterministically (4/4), so a None here means the service
+        # hiccuped, not that retrieval regressed.
+        _q = ("origami dragon teaching calculus to penguins in a "
+              "floating library in antarctica")
+        hit = row_rag_fallback(eng, _q, [table])
+        if hit is None:
+            time.sleep(2)
+            hit = row_rag_fallback(eng, _q, [table])
+        assert hit is not None, (
+            "sentinel should be retrievable (twice in a row returned nothing -- "
+            "check the embedding endpoint, not the retrieval logic)")
         assert hit["fields"][0] == "source"
         assert hit["data"][0].get("Title") == "ZZ Sentinel Row", \
             f"sentinel should rank top, got {hit['data'][0]}"
