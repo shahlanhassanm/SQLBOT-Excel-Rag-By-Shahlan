@@ -23,6 +23,7 @@ from common.audit.models.log_model import OperationType, OperationModules
 from common.audit.schemas.logger_decorator import LogConfig, system_log
 from common.core.config import settings
 from common.core.deps import SessionDep, CurrentUser, Trans
+from common.utils.paths import PathEscapeError, safe_join
 from common.utils.utils import SQLBotLogUtil
 from ..crud.datasource import get_datasource_list, check_status, create_ds, update_ds, delete_ds, getTables, getFields, \
     update_table_and_fields, getTablesByDs, chooseTables, preview, updateTable, updateField, get_ds, fieldEnum, \
@@ -46,6 +47,10 @@ from ..utils.island_detection import region_columns
 
 router = APIRouter(tags=["Datasource"], prefix="/datasource")
 path = settings.EXCEL_PATH
+
+# Extensions the upload/parse/import endpoints accept. Single source of
+# truth for both the ALLOWED_EXTENSIONS guards and safe_join (AUDIT D-06).
+UPLOAD_EXTENSIONS = (".xlsx", ".xls", ".csv")
 
 
 @router.get("/ws/{oid}", include_in_schema=False)
@@ -581,11 +586,17 @@ async def reparse_excel(req: ReparseSheetRequest):
     "Header row" dropdown. Updates the sidecar so the subsequent import uses
     the same row even if the override field isn't echoed back.
     """
-    save_path = os.path.join(path, req.filePath)
+    # Confine the caller-supplied name to the upload directory, and check the
+    # extension BEFORE touching the filesystem so a rejected request cannot be
+    # used to probe whether an arbitrary path exists (AUDIT D-06).
+    try:
+        save_path = safe_join(path, req.filePath, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not os.path.exists(save_path):
-        raise HTTPException(400, "File not found")
+        raise HTTPException(status_code=400, detail="File not found")
     if req.headerRow < 0:
-        raise HTTPException(400, "headerRow must be >= 0")
+        raise HTTPException(status_code=400, detail="headerRow must be >= 0")
 
     def inner():
         return reparse_sheet(save_path, req.sheetName, req.headerRow)
@@ -764,9 +775,15 @@ def _import_excel_sheets(save_path: str, sheets: List[SheetFields], trans: Trans
 @router.post("/importToDb", response_model=None, summary=f"{PLACEHOLDER_PREFIX}ds_import_to_db")
 @require_permissions(permission=SqlbotPermission(role=['ws_admin']))
 async def import_to_db(session: SessionDep, trans: Trans, import_req: ImportRequest):
-    save_path = os.path.join(path, import_req.filePath)
+    # Confine the caller-supplied name to the upload directory (AUDIT D-06).
+    # This endpoint loads the file into PostgreSQL and returns its contents, so
+    # an unconfined path is an arbitrary-file-read primitive.
+    try:
+        save_path = safe_join(path, import_req.filePath, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not os.path.exists(save_path):
-        raise HTTPException(400, "File not found")
+        raise HTTPException(status_code=400, detail="File not found")
 
     def inner():
         sheets = import_req.sheets

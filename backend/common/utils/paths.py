@@ -37,11 +37,21 @@ def resolve_within(base_dir: str, candidate: str) -> str:
     if not candidate or not str(candidate).strip():
         raise PathEscapeError("empty path")
 
+    # An embedded NUL makes os.path.realpath raise a bare ValueError, which
+    # callers catching PathEscapeError do not handle — it would surface as a 500
+    # instead of a 400. Reject it as the path error it is (AUDIT D-06).
+    if "\x00" in str(candidate):
+        raise PathEscapeError("path contains a null byte")
+
     if os.path.isabs(candidate):
         raise PathEscapeError("absolute paths are not permitted")
 
     real_base = os.path.realpath(base_dir)
-    real_path = os.path.realpath(os.path.join(real_base, candidate))
+    try:
+        real_path = os.path.realpath(os.path.join(real_base, candidate))
+    except (ValueError, OSError) as e:
+        # defence in depth: any other path-shaped rejection from the OS layer
+        raise PathEscapeError(f"path could not be resolved: {e}") from e
 
     if real_path != real_base and not real_path.startswith(real_base + os.sep):
         raise PathEscapeError("path escapes the permitted directory")
