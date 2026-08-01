@@ -948,6 +948,38 @@ def ask_model(entry: dict, timeout: int, descriptions: bool = False,
 # --------------------------------------------------------------------------
 # mode: full SQLBot pipeline
 # --------------------------------------------------------------------------
+def ask_pipeline_capped(entry: dict, ds_id: int, finish: str,
+                        cap_seconds: int) -> tuple[str, str]:
+    """`ask_pipeline` with a hard wall-clock cap.
+
+    `--timeout` was only ever wired into `--mode model` (via `chat()`); the
+    pipeline path had NO per-question limit at all, so a single question could
+    hold the GPU indefinitely -- one was measured at 45 minutes, and a stalled
+    question silently costs an entire run. The flag appeared to be doing
+    something, which is worse than not having it.
+
+    The worker thread cannot be forcibly killed in CPython, so on expiry we stop
+    waiting, mark the question TIMEOUT and move on. The abandoned thread is
+    daemonic: it cannot keep the process alive at exit, and the next question
+    proceeds regardless. Raising TimeoutError routes into the existing
+    `_is_timeout` handling from E-12, so the question is recorded as TIMEOUT
+    rather than silently scored as a wrong answer.
+    """
+    import concurrent.futures as _cf
+
+    ex = _cf.ThreadPoolExecutor(max_workers=1,
+                                thread_name_prefix=f"bird-q{entry.get('question_id')}")
+    fut = ex.submit(ask_pipeline, entry, ds_id, finish)
+    try:
+        return fut.result(timeout=cap_seconds)
+    except _cf.TimeoutError:
+        raise TimeoutError(
+            f"question exceeded the {cap_seconds}s cap and was abandoned")
+    finally:
+        # Never block waiting for an abandoned worker.
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
 def ask_pipeline(entry: dict, ds_id: int, finish: str = "sql") -> tuple[str, str]:
     """finish='sql'  -> stop after SQL generation (identifier-check retries only;
                         self-consistency candidates are CANCELLED and execution
@@ -1272,8 +1304,8 @@ def main():
                                     args.promptfix, model)
                     sql, msg = extract_sql(raw), ""
             else:
-                sql, msg = ask_pipeline(entry, ds_map[entry["db_id"]],
-                                        finish=args.finish)
+                sql, msg = ask_pipeline_capped(entry, ds_map[entry["db_id"]],
+                                               args.finish, args.timeout)
                 sql = extract_sql(sql) if sql else ""
             rec["sql"] = sql[:2000]
 
@@ -1322,7 +1354,10 @@ def main():
         print(f"             {rec['detail'][:110]}", flush=True)
 
     tag = args.mode + ("+desc" if args.descriptions else "") + ("+v2" if args.promptfix else "")
-    report(results, out_path, f"{tag} [{model}]")
+    # The model ACTUALLY used, not the one requested: in pipeline mode
+    # `--model` is ignored, so printing it here mislabelled the report
+    # exactly as the provenance block did (AUDIT D-40).
+    report(results, out_path, f"{tag} [{_prov['model']}]")
 
 
 def report(results, out_path, mode):
