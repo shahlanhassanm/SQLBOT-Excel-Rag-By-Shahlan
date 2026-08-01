@@ -401,3 +401,34 @@ architectural decisions rather than code fixes.
 then `bird_make_subset.py --src <it>` reproduces the subset exactly (SEED=0). At
 measured rates 500 questions is ~13 h on gpt-oss and ~27 h on qwen20k, so budget
 the vGPU licence accordingly.
+
+---
+
+# Second benchmark launch (after the "fix all issues" pass)
+
+Code state at launch: **634 root tests / 28 backend, 0 failures**, deterministic
+across repeated runs. Commits `20bb1f0` (D-19) … `87c9b1c`.
+
+```
+bash backend/tests/bird_run_supervised.sh /tmp/bird_gptoss_post.json \
+     --model gpt-oss:20b --timeout 900              # running
+bash /tmp/chain_qwen2.sh                             # queued behind it
+     -> /tmp/bird_qwen20k_post.json --model qwen2.5-coder:32b-20k
+```
+
+Progress:
+
+```bash
+docker exec sqlbot python3 -c "import json;d=json.load(open('/tmp/bird_gptoss_post.json'));\
+ok=sum(1 for r in d if r.get('status')=='CORRECT');print(len(d),'/150',f'{100*ok/max(len(d),1):.1f}%')"
+```
+
+These are FRESH files, deliberately not resuming the earlier 30/150 partial:
+that partial was produced by pre-fix code, and mixing code revisions inside one
+results file is exactly what E-08 exists to prevent.
+
+Compare **full-run vs full-run** against `bird_pipeline_gptoss_150.json`
+(37.3 %) and `bird_32b20k_150.json` (35.3 %) with `bird_significance.py`.
+D-37 provably cannot move these numbers: `bird_eval` builds
+`UserInfoDTO(id=1, isAdmin=True)`, which bypassed the permission gate before and
+bypasses it now — pinned by `test_benchmark_principal_is_unaffected`.
