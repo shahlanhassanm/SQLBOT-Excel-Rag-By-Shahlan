@@ -11,8 +11,51 @@ import os
 import re
 import unittest
 
-# Project root relative to this test file
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# These tests assert on REPO SOURCE files -- frontend/src/entity/supplier.ts,
+# frontend i18n, docs/, backend/locales. Deriving the root as
+# dirname(dirname(__file__)) assumed the test file always sits at <repo>/tests/.
+# Under the project's own documented in-container workflow the suite is copied
+# to /tmp/roottests, so the root resolved to /tmp and all 24 tests failed
+# deterministically on missing files -- 100% path, 0% content (AUDIT D-19).
+#
+# Walk up looking for a marker instead, and fall back to the known checkout
+# location. If no repo tree is reachable -- e.g. the runtime container, which
+# ships no frontend/ at all -- skip rather than fail: a backend image legitimately
+# does not contain the frontend sources these tests describe.
+
+
+def _find_repo_root():
+    """Nearest ancestor of this file that looks like the SQLBot checkout."""
+    markers = (
+        os.path.join("frontend", "src", "entity", "supplier.ts"),
+        os.path.join("backend", "locales", "en.json"),
+    )
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    d = here
+    while True:
+        candidates.append(d)
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    candidates.append(os.environ.get("SQLBOT_REPO_ROOT", ""))
+    candidates.append("/home/iguser/Downloads/SQLBOT-Excel-Rag-main")
+    for c in candidates:
+        if c and all(os.path.exists(os.path.join(c, m)) for m in markers):
+            return c
+    return None
+
+
+PROJECT_ROOT = _find_repo_root()
+
+if PROJECT_ROOT is None:
+    raise unittest.SkipTest(
+        "SQLBot repo tree not reachable from "
+        f"{os.path.dirname(os.path.abspath(__file__))}; these tests assert on "
+        "frontend/ and docs/ sources that the backend runtime image does not "
+        "contain. Run them from a full checkout, or set SQLBOT_REPO_ROOT."
+    )
 
 
 class TestMiniMaxSupplierConfig(unittest.TestCase):
