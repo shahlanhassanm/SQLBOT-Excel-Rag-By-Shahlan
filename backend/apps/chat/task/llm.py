@@ -44,8 +44,8 @@ from apps.chat.task.agentic import (build_result_preview, format_retry_feedback,
                                     REFUSAL_TAG as _REFUSAL_TAG, is_refusal_message,
                                     strip_refusal_tag, refusal_retry_feedback,
                                     apply_nulls_last)
-from apps.chat.task.sql_validate import (format_identifier_feedback, sqlglot_dialect,
-                                         validate_sql_identifiers)
+from apps.chat.task.sql_validate import (build_schema_index, format_identifier_feedback,
+                                         sqlglot_dialect, validate_sql_identifiers)
 
 
 def _csv_terms(value: str) -> list:
@@ -2416,8 +2416,18 @@ class LLMService:
                     if agentic_on and attempt < max_attempts:
                         _id_findings = self.validate_identifiers(sql)
                         if _id_findings:
+                            # Pass the schema index so an unknown column also
+                            # names the table that owns it. "column X does not
+                            # exist" told the model nothing it did not already
+                            # know, so it returned byte-identical SQL and the
+                            # retry was wasted (AUDIT lever L-C).
+                            try:
+                                _id_index = build_schema_index(
+                                    self.chat_question.db_schema)
+                            except Exception:
+                                _id_index = None
                             raise _AgenticIdentifierReject(
-                                format_identifier_feedback(_id_findings), sql)
+                                format_identifier_feedback(_id_findings, _id_index), sql)
 
                     if ((not self.current_assistant or is_page_embedded) and is_normal_user(
                             self.current_user)) or use_dynamic_ds:

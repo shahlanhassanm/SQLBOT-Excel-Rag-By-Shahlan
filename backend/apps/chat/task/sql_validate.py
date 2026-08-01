@@ -314,7 +314,35 @@ def _qualified_display(qualifier: Optional[str], column: str) -> str:
     return f'{qualifier}.{column}' if qualifier else str(column)
 
 
-def format_identifier_feedback(findings: Sequence[Dict[str, str]]) -> str:
+def owners_hint(column: str, schema_index: dict[str, Any] | None,
+                exclude: str = '') -> str:
+    """Name the tables that really DO own ``column``.
+
+    Telling a model "column `frequency` does not exist" gives it nothing it did
+    not already know, so it returns byte-identical SQL and the retry is wasted.
+    The column is almost always real and sitting on a table the query failed to
+    join — so say which one. Ported from the benchmark harness, where this
+    rescued a repair loop that was ending "no change, giving up" on 28 of 47
+    attempts (AUDIT lever L-C).
+    """
+    if not schema_index:
+        return ''
+    norm = normalize_identifier(column.split('.')[-1])
+    excl = normalize_identifier(exclude) if exclude else ''
+    owners = sorted(
+        original for table, cols in (schema_index.get('columns') or {}).items()
+        if norm in cols and table != excl
+        for original in [(schema_index.get('tables') or {}).get(table, table)]
+    )
+    if not owners:
+        return ''
+    shown = ', '.join(f'"{t}"' for t in owners[:3])
+    more = f' (and {len(owners) - 3} more)' if len(owners) > 3 else ''
+    return f'; it belongs to {shown}{more} — join that table or qualify it there'
+
+
+def format_identifier_feedback(findings: Sequence[Dict[str, str]],
+                               schema_index: dict[str, Any] | None = None) -> str:
     """Render findings as the retry detail string.
 
     Deliberately explicit about the exact expected spelling — the whole point of
@@ -331,7 +359,9 @@ def format_identifier_feedback(findings: Sequence[Dict[str, str]]) -> str:
         if kind == 'unknown-table':
             lines.append(f'- table "{identifier}" does not exist in the provided schema')
         elif kind == 'unknown-column':
-            lines.append(f'- column "{identifier}" does not exist in the provided schema')
+            qualifier = identifier.split('.')[0] if '.' in identifier else ''
+            lines.append(f'- column "{identifier}" does not exist in the provided '
+                         f'schema{owners_hint(identifier, schema_index, qualifier)}')
         elif kind == 'case-mismatch-table':
             lines.append(f'- table "{identifier}" is spelled "{expected}" in the schema; '
                          f'copy it exactly')

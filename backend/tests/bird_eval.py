@@ -98,6 +98,30 @@ def _norm_cell(v: object) -> object:
     return v
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    """True when a question failed on the clock rather than on its answer.
+
+    Covers the stdlib TimeoutError, requests/urllib3 timeouts and psycopg2's
+    statement_timeout, without importing any of them: the harness runs in both
+    the container and on the host, where the set of installed clients differs.
+    """
+    seen, stack = set(), [exc]
+    while stack:
+        e = stack.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, TimeoutError):
+            return True
+        name = type(e).__name__.lower()
+        if "timeout" in name or "timedout" in name:
+            return True
+        if "timeout" in str(e).lower() or "canceling statement" in str(e).lower():
+            return True
+        stack.extend([e.__cause__, e.__context__])
+    return False
+
+
 def calculate_ex_tolerant(predicted_res, ground_truth_res) -> int:
     p = {tuple(_norm_cell(c) for c in row) for row in predicted_res}
     g = {tuple(_norm_cell(c) for c in row) for row in ground_truth_res}
@@ -406,11 +430,115 @@ def catalog(db_id: str) -> dict:
     return out
 
 
+def _schema_index_from_ddl(schema_str: str, sv) -> dict:
+    """Adapt this harness's CREATE TABLE text to the product's schema index.
+
+    `sql_validate.build_schema_index` parses the M-Schema format the chat
+    pipeline builds (`# Table: schema.name` + `(col:type)`), while this harness
+    emits plain DDL. Feeding it DDL yields an empty -- and therefore silently
+    disabled -- index, which is how the two systems drifted apart in the first
+    place (AUDIT E-03, and the same class of mismatch as the XiYan M-Schema
+    finding).
+
+    Only the INDEXING is adapted here; the identifier extraction, diffing and
+    feedback formatting are the shipping functions.
+
+    Column names in this bank contain spaces ("Academic Year text"), so the
+    type is taken as the last whitespace-separated token and the name is
+    everything before it.
+    """
+    index = {'tables': {}, 'columns': {}, 'all_columns': {}}
+    table = None
+    for raw in (schema_str or '').splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if low.startswith('create table'):
+            name = line[len('CREATE TABLE'):].strip().rstrip('(').strip().strip('"')
+            table = sv.normalize_identifier(name)
+            index['tables'][table] = name
+            index['columns'].setdefault(table, {})
+            continue
+        if line.startswith(')') or line == ';':
+            table = None
+            continue
+        if table is None:
+            continue
+        col_def = line.rstrip(',').strip()
+        if not col_def or ' ' not in col_def:
+            continue
+        col_name = col_def.rsplit(' ', 1)[0].strip().strip('"')
+        if not col_name:
+            continue
+        norm = sv.normalize_identifier(col_name)
+        index['columns'][table][norm] = col_name
+        index['all_columns'].setdefault(norm, col_name)
+    return index
+
+
+def _production_identifier_findings(sql: str, db_id: str) -> "list[str] | None":
+    """Run the SHIPPING identifier check, not the harness's copy.
+
+    AUDIT E-03: this harness re-implemented four capabilities the product
+    already has -- identifier checking, join-graph discovery, value sampling and
+    the repair loop -- and called none of the product code. `--mode model
+    --all-fixes` therefore measured a third system that does not ship, so a
+    benchmark gain could not be assumed to reach users.
+
+    This routes the identifier check through `apps.chat.task.sql_validate`, the
+    same module the chat pipeline uses, so the two can be COMPARED. It is not
+    wired into `lint_sql`, and deliberately so: measured against this bank the
+    harness's local check is strictly better than the shipping one. It knows
+    that PostgreSQL exposes a bare aggregate as an output name (`ORDER BY
+    count` is legal), and its `_owners_hint` names the table that actually owns
+    a missing column. Substituting the product's check made two existing lint
+    tests fail with false positives.
+
+    So the E-03 divergence is real but points the OTHER way: the fix that helps
+    users is porting the harness's sophistication INTO the product (lever L-C),
+    not degrading the harness to match. Keep this function as the differ, and
+    see `test_eval_harness_integrity.py`.
+
+    Returns None when the app is not importable (the harness also runs on the
+    host, outside the container).
+    """
+    try:
+        from apps.chat.task import sql_validate as sv
+    except Exception:
+        return None
+    try:
+        index = _schema_index_from_ddl(
+            get_schema(db_id, descriptions=False, values=False), sv)
+        if not sv.schema_index_is_usable(index):
+            return None
+        extracted = sv.extract_identifiers(sql, sv.sqlglot_dialect("pg"))
+        if not extracted:
+            return None
+        findings = sv.diff_identifiers(extracted, index, "pg")
+        # Keep ONLY existence errors. `case-mismatch` findings are correct for
+        # the product -- it wants identifiers copied verbatim so quoting is
+        # safe -- but they are FALSE POSITIVES against this bank: PostgreSQL
+        # folds unquoted identifiers, so `s.School` and `school` are the same
+        # column. Feeding that back would teach the repair loop to "fix"
+        # working SQL, the same class of harm as the lint_sql alias/CTE false
+        # positives already recorded in the audit.
+        findings = [f for f in findings
+                    if str(f.get("kind", "")).startswith("unknown-")]
+        if not findings:
+            return []
+        text = sv.format_identifier_feedback(findings)
+        return [ln.strip() for ln in text.splitlines() if ln.strip()]
+    except Exception:
+        return None
+
+
 def lint_sql(sql: str, db_id: str) -> list:
     """Static problems, worst first. Empty list means 'looks sane'."""
     problems = []
     if not sql.strip():
         return ["empty query"]
+
 
     low = sql.lower()
     for fn, repl in SQLITE_ONLY.items():
@@ -1102,6 +1230,12 @@ def main():
                     rec["detail"] = f"pred_rows={len(pred)} gold_rows={len(gold)}"
         except Exception as e:
             rec["detail"] = f"{type(e).__name__}: {str(e)[:200]}"
+            # A timeout says the GPU was slow, not that the model was wrong.
+            # Scored as wrong for official-EX compatibility, but tagged so a
+            # slow host is visible instead of silently depressing the score
+            # (AUDIT E-12).
+            if _is_timeout(e):
+                rec["status"] = "TIMEOUT"
 
         rec["seconds"] = round(time.time() - t0, 1)
         rec["run_tag"] = _tag
@@ -1143,6 +1277,19 @@ def report(results, out_path, mode):
     print(f"  Soft-F1        : {100*f1/n:.1f}%")
     print(f"  Soft-F1 (tol)  : {100*f1_tol/n:.1f}%   "
           f"(paired with EX-tolerant; see AUDIT E-09)")
+
+    # AUDIT E-12: timeouts are a property of the host, not of the model. They
+    # are counted as wrong above (official-metric compatibility), so surface
+    # them explicitly -- otherwise a slow GPU quietly depresses the score in a
+    # way a faster one would not, and the run looks like a worse model.
+    timed_out = [r for r in results if r.get("status") == "TIMEOUT"]
+    if timed_out:
+        ex_ex = 100 * ex / (n - len(timed_out)) if n > len(timed_out) else 0.0
+        print(f"  TIMEOUTS       : {len(timed_out)}/{n} "
+              f"({100*len(timed_out)/n:.1f}%) -- counted as WRONG above")
+        print(f"    EX excl. them: {ex}/{n-len(timed_out)} = {ex_ex:.1f}%   "
+              f"<- compare runs on different hardware with THIS number")
+        print(f"    qids         : {[r['question_id'] for r in timed_out][:20]}")
 
     print("\n  by difficulty:")
     for d in ("simple", "moderate", "challenging"):
