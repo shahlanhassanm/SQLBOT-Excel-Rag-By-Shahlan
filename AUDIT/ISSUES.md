@@ -30,7 +30,8 @@ One row per item. Detail lives in the phase document named in the last column.
 | **D-06** | ✅ **FIXED** | `40cb518` | +21 |
 | **D-38** *(new)* | ✅ **FIXED** | `d7dbb80` | +43 |
 | **D-10** / **E-01** | ✅ **FIXED** | `3b6717b` | +12 |
-| **GROUP A** — E-06, E-08, E-09 | ✅ **FIXED** | *(pending)* | +7 |
+| **GROUP A** — E-06, E-08, E-09 | ✅ **FIXED** | `65e37dc` | +7 |
+| **GROUP E** — D-25, D-26 | ✅ **FIXED** | *(pending)* | +21 |
 | **D-39** *(new)* | **WONTFIX — architectural** (cycle passes through closed-source `sqlbot_xpack`) | — | — |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
@@ -79,8 +80,8 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | **D-22** | data hygiene | `backend/tests/bird_results/` | `bird_32b20k_150.json` and `bird_qwen32b20k_150.json` are **byte-identical** (md5 `afb15069…`). Two names, one experiment. | ✅ | OPEN |
 | **D-23** | correctness | `apps/system/api/assistant.py:115` | Mutable default argument `files: List[UploadFile] = []` on a file-upload endpoint. | 📖 | OPEN |
 | **D-24** | performance | `apps/datasource/api/datasource.py:367-398` | `insert_pg` (reachable via the deprecated `/uploadExcel`) still has the un-rewound `StringIO` bug that `_insert_df_to_pg` documents as fixed: COPY reads nothing, `to_sql` silently does the work row-by-row. | 📖 | OPEN |
-| **D-25** | security | `apps/db/db.py:658-663, 789-833` | Stacked statements are not rejected. `check_sql_read` type-checks each parsed statement but only keyword-checks the first; `SELECT 1; SELECT pg_sleep(30)` passes. Widens D-08. | 📖 | OPEN |
-| **D-26** | security | `apps/datasource/relations.py:120, 152, 173, 189, 207, 214` | Schema name interpolated into constraint-discovery SQL with only `'` escaped. Datasource-edit rights required. | 📖 | OPEN |
+| **D-25** | security | `apps/db/db.py:658-663, 789-833` | Stacked statements are not rejected. `check_sql_read` type-checks each parsed statement but only keyword-checks the first; `SELECT 1; SELECT pg_sleep(30)` passes. Widens D-08. | 📖 | ✅ FIXED |
+| **D-26** | security | `apps/datasource/relations.py` | **SEVERITY OVERSTATED IN THE AUDIT.** Doubling `'` IS the complete escape for a single-quoted literal (and `standard_conforming_strings` defaults on since PG 9.1), so the original code was substantially correct. A quote in a schema name is also legitimate — PostgreSQL allows it in a quoted identifier — and `tests/test_relations.py` already asserted escape-not-reject. Residual gap closed: control characters (NUL etc.) are not escapable and are now refused. | 📖 | ✅ FIXED (scope corrected) |
 | **E-06** | measurement | `backend/tests/bird_eval.py` | Results files carry **no provenance** — no model, no flags, no git rev, no timestamp. Directly caused D-22. | 📖 | OPEN |
 | **E-08** | measurement | `backend/tests/bird_eval.py:868` | `--resume` merges records produced under different flags into one file with nothing recording the mix. | 📖 | OPEN |
 | **E-09** | measurement | `backend/tests/bird_eval.py:101 vs :125` | `ex_tol=1` and `f1=0` can coexist for the same record — EX-tolerant rounds to 6 dp, F1 does exact `Decimal` membership. The two metrics disagree about the same rows. | ✅ | OPEN |

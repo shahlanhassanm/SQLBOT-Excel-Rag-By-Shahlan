@@ -19,7 +19,7 @@ if platform.system() != "Darwin":
     import dmPython
 import pymysql
 import redshift_connector
-from sqlalchemy import create_engine, text, Engine
+from sqlalchemy import create_engine, event, text, Engine
 from sqlalchemy.orm import sessionmaker
 
 from apps.datasource.models.datasource import DatasourceConf, CoreDatasource, TableSchema, ColumnSchema
@@ -137,6 +137,54 @@ def get_origin_connect(type: str, conf: DatasourceConf):
             )
 
 
+def _statement_timeout_sql(ds_type: str, seconds: int) -> Optional[str]:
+    """Dialect-specific statement (not connection) timeout, or None if unsupported.
+
+    ``connect_timeout`` only bounds opening the connection; without this a query
+    runs forever. A generated query with an OR join condition and a correlated
+    subquery was measured running 14.5 minutes, pinning both a connection and the
+    worker thread with no error surfaced to the user.
+    """
+    ms = seconds * 1000
+    if equals_ignore_case(ds_type, 'pg') or equals_ignore_case(ds_type, 'redshift') \
+            or equals_ignore_case(ds_type, 'kingbase'):
+        return f'SET statement_timeout = {ms}'
+    if equals_ignore_case(ds_type, 'mysql') or equals_ignore_case(ds_type, 'doris') \
+            or equals_ignore_case(ds_type, 'starrocks'):
+        # MySQL 5.7.8+ / caps SELECTs only, which is all we generate
+        return f'SET SESSION max_execution_time = {ms}'
+    if equals_ignore_case(ds_type, 'ck'):
+        return f'SET max_execution_time = {seconds}'
+    # oracle/sqlServer/sqlite/hive/es: no session-level equivalent worth risking
+    return None
+
+
+def _apply_statement_timeout(engine: Engine, ds_type: str) -> None:
+    """Issue the timeout on every new connection in the pool.
+
+    Done as a connect-time listener rather than inside each exec path so no query
+    route can bypass it. Fails open: a dialect that rejects the statement must not
+    make the datasource unusable.
+    """
+    seconds = settings.DS_STATEMENT_TIMEOUT
+    if not seconds or seconds <= 0:
+        return
+    sql = _statement_timeout_sql(ds_type, seconds)
+    if not sql:
+        return
+
+    @event.listens_for(engine, 'connect')
+    def _set_timeout(dbapi_connection, _connection_record):
+        try:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(sql)
+            finally:
+                cursor.close()
+        except Exception as e:
+            SQLBotLogUtil.warning(f'could not set statement_timeout on {ds_type}: {e}')
+
+
 # use sqlalchemy
 def get_engine(ds: CoreDatasource, timeout: int = 0) -> Engine:
     conf = DatasourceConf(**json.loads(aes_decrypt(ds.configuration))) if not equals_ignore_case(ds.type,
@@ -166,6 +214,8 @@ def get_engine(ds: CoreDatasource, timeout: int = 0) -> Engine:
         engine = create_engine(get_uri(ds), connect_args={"check_same_thread": False}, poolclass=NullPool)
     else:  # ck
         engine = create_engine(get_uri(ds), connect_args={"connect_timeout": conf.timeout}, poolclass=NullPool)
+    # ds may be an AssistantOutDsSchema, whose `type` is Optional
+    _apply_statement_timeout(engine, getattr(ds, 'type', None) or '')
     return engine
 
 
@@ -591,6 +641,20 @@ def convert_value(value, datetime_format='space'):
         return value
 
 
+def _dedup_columns(columns):
+    """`SELECT a.id, b.id` projects two columns named `id`; rows are built as
+    dicts keyed by column name, so the second would silently overwrite the
+    first and a whole column of data would vanish from the result. Suffix
+    repeats (`id`, `id_2`, ...) so every projected column survives."""
+    seen = {}
+    out = []
+    for c in columns:
+        n = seen.get(c, 0)
+        out.append(c if n == 0 else f"{c}_{n + 1}")
+        seen[c] = n + 1
+    return out
+
+
 def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=False):
     while sql.endswith(';'):
         sql = sql[:-1]
@@ -603,7 +667,10 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
         with get_session(ds) as session:
             with session.execute(text(sql)) as result:
                 try:
-                    columns = result.keys()._keys if origin_column else [item.lower() for item in result.keys()._keys]
+                    # list(result.keys()) is the public API; .keys()._keys is a
+                    # private attribute that breaks across SQLAlchemy versions.
+                    columns = _dedup_columns(list(result.keys()) if origin_column
+                                             else [item.lower() for item in result.keys()])
                     res = result.fetchall()
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
@@ -622,9 +689,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
                 try:
                     cursor.execute(sql, timeout=conf.timeout)
                     res = cursor.fetchall()
-                    columns = [field[0] for field in cursor.description] if origin_column else [field[0].lower() for
-                                                                                                field in
-                                                                                                cursor.description]
+                    columns = _dedup_columns([field[0] for field in cursor.description] if origin_column
+                                             else [field[0].lower() for field in cursor.description])
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                         res
@@ -642,9 +708,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
                 try:
                     cursor.execute(sql)
                     res = cursor.fetchall()
-                    columns = [field[0] for field in cursor.description] if origin_column else [field[0].lower() for
-                                                                                                field in
-                                                                                                cursor.description]
+                    columns = _dedup_columns([field[0] for field in cursor.description] if origin_column
+                                             else [field[0].lower() for field in cursor.description])
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                         res
@@ -660,9 +725,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
                 try:
                     cursor.execute(sql)
                     res = cursor.fetchall()
-                    columns = [field[0] for field in cursor.description] if origin_column else [field[0].lower() for
-                                                                                                field in
-                                                                                                cursor.description]
+                    columns = _dedup_columns([field[0] for field in cursor.description] if origin_column
+                                             else [field[0].lower() for field in cursor.description])
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                         res
@@ -679,9 +743,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
                 try:
                     cursor.execute(sql)
                     res = cursor.fetchall()
-                    columns = [field[0] for field in cursor.description] if origin_column else [field[0].lower() for
-                                                                                                field in
-                                                                                                cursor.description]
+                    columns = _dedup_columns([field[0] for field in cursor.description] if origin_column
+                                             else [field[0].lower() for field in cursor.description])
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                         res
@@ -693,9 +756,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
         elif equals_ignore_case(ds.type, 'es'):
             try:
                 res, columns = get_es_data_by_http(conf, sql)
-                columns = [field.get('name') for field in columns] if origin_column else [field.get('name').lower() for
-                                                                                          field in
-                                                                                          columns]
+                columns = _dedup_columns([field.get('name') for field in columns] if origin_column
+                                         else [field.get('name').lower() for field in columns])
                 result_list = [
                     {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                     res
@@ -712,9 +774,8 @@ def exec_sql(ds: CoreDatasource | AssistantOutDsSchema, sql: str, origin_column=
                     hive_sql = re.sub(r'"([A-Za-z_][A-Za-z0-9_]*)"', r'`\1`', sql)
                     cursor.execute(hive_sql)
                     res = cursor.fetchall()
-                    columns = [field[0] for field in cursor.description] if origin_column else [field[0].lower() for
-                                                                                                field in
-                                                                                                cursor.description]
+                    columns = _dedup_columns([field[0] for field in cursor.description] if origin_column
+                                             else [field[0].lower() for field in cursor.description])
                     result_list = [
                         {str(columns[i]): convert_value(value) for i, value in enumerate(tuple_item)} for tuple_item in
                         res
@@ -753,6 +814,15 @@ def check_sql_read(sql: str, ds: CoreDatasource | AssistantOutDsSchema):
 
         if not statements:
             raise ValueError("Parse SQL Error")
+
+        # Exactly ONE statement. The keyword check below only inspects the first
+        # one, so `SELECT 1; SELECT pg_sleep(30)` used to pass and the driver
+        # executed both. Every legitimate shape this codebase produces -- a
+        # trailing semicolon, a CTE, a UNION ALL (the SQL Server constraint
+        # query), a subquery -- parses to a single statement, so this rejects
+        # only stacked payloads (AUDIT D-25).
+        if len([s for s in statements if s is not None]) > 1:
+            return False
 
         write_types = (
             exp.Insert, exp.Update, exp.Delete,
