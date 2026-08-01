@@ -122,11 +122,29 @@ def calculate_row_match(predicted_row, ground_truth_row):
             element_in_truth_only / total_columns)
 
 
+def _row_sort_key(row: tuple[object, ...]) -> tuple[tuple[bool, str, str], ...]:
+    """Total-order key for a result row, safe across BIRD's cell types.
+
+    A bare ``sorted()`` raises TypeError the moment a column mixes None with a
+    string, or an int with a date — which BIRD rows routinely do. Sorting on
+    ``(is_none, type_name, str(value))`` per cell is total, stable and needs no
+    type coercion, so it cannot change any value the metric then compares.
+    """
+    return tuple((v is None, type(v).__name__, str(v)) for v in row)
+
+
 def calculate_f1_score(predicted, ground_truth) -> float:
     if not predicted and not ground_truth:
         return 1.0
     predicted = list(dict.fromkeys(predicted))
     ground_truth = list(dict.fromkeys(ground_truth))
+    # Rows are paired POSITIONALLY below. Most gold queries have no ORDER BY, so
+    # without a canonical order the same prediction scores differently between
+    # runs — measured at 51.8 / 52.0 / 52.5 on one unchanged results file.
+    # Sorting both sides makes the metric a function of the row multiset, which
+    # is what it was always meant to measure (AUDIT D-10).
+    predicted.sort(key=_row_sort_key)
+    ground_truth.sort(key=_row_sort_key)
 
     match_scores, pred_only_scores, truth_only_scores = [], [], []
     for i, gt_row in enumerate(ground_truth):
@@ -784,7 +802,14 @@ def ask_model(entry: dict, timeout: int, descriptions: bool = False,
 # --------------------------------------------------------------------------
 # mode: full SQLBot pipeline
 # --------------------------------------------------------------------------
-def ask_pipeline(entry: dict, ds_id: int) -> tuple[str, str]:
+def ask_pipeline(entry: dict, ds_id: int, finish: str = "sql") -> tuple[str, str]:
+    """finish='sql'  -> stop after SQL generation (identifier-check retries only;
+                        self-consistency candidates are CANCELLED and execution
+                        retries/grader never run — measures less than the UI has).
+       finish='data' -> run through execution: execution-error retries, the
+                        empty-result grader and the self-consistency vote all
+                        fire, and the returned SQL is the post-vote/post-repair
+                        statement. This is what a UI user actually gets."""
     import asyncio
     from sqlmodel import Session
     from common.core.db import engine
@@ -812,8 +837,10 @@ def ask_pipeline(entry: dict, ds_id: int) -> tuple[str, str]:
         finally:
             loop.close()
         svc.init_record(session=session)
+        step = (ChatFinishStep.QUERY_DATA if finish == "data"
+                else ChatFinishStep.GENERATE_SQL)
         svc.run_task_async(in_chat=False, stream=False,
-                           finish_step=ChatFinishStep.GENERATE_SQL, return_img=False)
+                           finish_step=step, return_img=False)
         last = {}
         for chunk in svc.await_result():
             if chunk:
@@ -821,6 +848,33 @@ def ask_pipeline(entry: dict, ds_id: int) -> tuple[str, str]:
         res = last if isinstance(last, dict) else {"raw": last}
         sql = res.get("sql") or res.get("sqlContent") or res.get("sql-content") or ""
         return sql, (res.get("message") or "")[:200]
+
+
+def stratified_sample(bank: list, n: int) -> list:
+    """N questions spread evenly over (db_id, difficulty), deterministic.
+
+    Round-robins across strata so every database appears before any database gets
+    a second question, then keeps question_id order for a stable, resumable run.
+    No RNG: the same N always yields the same subset, so two configurations can be
+    compared on identical questions.
+    """
+    if n <= 0 or n >= len(bank):
+        return bank
+    strata = collections.OrderedDict()
+    for q in bank:
+        strata.setdefault((q["db_id"], q["difficulty"]), []).append(q)
+    picked, keys = [], list(strata)
+    while len(picked) < n:
+        progressed = False
+        for k in keys:
+            if strata[k]:
+                picked.append(strata[k].pop(0))
+                progressed = True
+                if len(picked) == n:
+                    break
+        if not progressed:
+            break
+    return sorted(picked, key=lambda q: q["question_id"])
 
 
 # --------------------------------------------------------------------------
@@ -839,6 +893,17 @@ def main():
                     help="use the v2 prompt (output shape, casting, PG dialect)")
     ap.add_argument("--only-db", default="",
                     help="comma-separated db_ids to restrict the run to")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="stratified subset of N questions, spread evenly across "
+                         "databases and difficulties. Use this INSTEAD of --limit for "
+                         "a slice: --limit takes the first N by question_id, which "
+                         "clusters into a few databases (a 40-question --limit slice "
+                         "covered 4 of 11 dbs and missed formula_1 entirely, the one "
+                         "database where context-overflow failures occur).")
+    ap.add_argument("--finish", choices=["sql", "data"], default="sql",
+                    help="pipeline mode depth: 'sql' stops after generation "
+                         "(no execution retries/vote); 'data' runs the full "
+                         "execute+retry+self-consistency path the UI ships")
     ap.add_argument("--model", default="", help="override BIRD_MODEL")
     ap.add_argument("--values", action="store_true",
                     help="F5: sample real values of low-cardinality text columns")
@@ -875,7 +940,11 @@ def main():
     if args.only_db:
         keep = {d.strip() for d in args.only_db.split(",") if d.strip()}
         bank = [q for q in bank if q["db_id"] in keep]
-    if args.limit:
+    if args.sample:
+        bank = stratified_sample(bank, args.sample)
+        print(f"[sample] stratified {len(bank)} questions across "
+              f"{len({q['db_id'] for q in bank})} databases", flush=True)
+    elif args.limit:
         bank = bank[:args.limit]
 
     results = []
@@ -933,7 +1002,8 @@ def main():
                                     args.promptfix, model)
                     sql, msg = extract_sql(raw), ""
             else:
-                sql, msg = ask_pipeline(entry, ds_map[entry["db_id"]])
+                sql, msg = ask_pipeline(entry, ds_map[entry["db_id"]],
+                                        finish=args.finish)
                 sql = extract_sql(sql) if sql else ""
             rec["sql"] = sql[:2000]
 

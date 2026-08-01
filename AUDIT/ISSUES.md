@@ -28,7 +28,8 @@ One row per item. Detail lives in the phase document named in the last column.
 | **D-05 option 2** | **DEFERRED — separately tracked** (see D-37) | — | — |
 | **L-A** | ✅ **FIXED + BENCHMARKED** | `0026e3d` `34886ee` | +15 |
 | **D-06** | ✅ **FIXED** | `40cb518` | +21 |
-| **D-38** *(new)* | ✅ **FIXED** | *(pending)* | +43 |
+| **D-38** *(new)* | ✅ **FIXED** | `d7dbb80` | +43 |
+| **D-10** | ✅ **FIXED** | *(pending)* | +12 |
 | **D-39** *(new)* | **WONTFIX — architectural** (cycle passes through closed-source `sqlbot_xpack`) | — | — |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
@@ -52,7 +53,7 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | **D-07** | security · traversal + error handling | `apps/settings/api/base.py:2, 22, 25-30` | `/system/download-fail-info`: traversal via `req.file`; existence check runs **before** the extension check; and `from http.client import HTTPException` means every guard returns **500** instead of 4xx. Same wrong import at `apps/system/crud/user_excel.py:4`. | 📖 | ✅ FIXED `740a5ff` |
 | **D-08** | security · SQL injection | `apps/datasource/crud/datasource.py:530, 534-544, 350-388` | Field/table names interpolated into SQL with hand-written quotes and **no quote-escaping**. Names originate from spreadsheet headers, which `region_columns` does not sanitise. Fires on **every chat question** via `get_table_sample_data`, not just admin screens. | 📖 | ✅ FIXED `35825f6` |
 | **D-09** | correctness | `common/utils/utils.py:60-80` | `extract_nested_json` returns the **first** balanced JSON object in the model's output, not the answer. Affects every SQL parse, chart parse, brief and chart-type extraction. Also a bare `except:`. The repo's own harness uses the opposite convention (`m[-1]`). | 📖 | ✅ FIXED `123f890` |
-| **D-10** | measurement | `backend/tests/bird_eval.py:125-150` | **Soft-F1 is non-deterministic.** Positional row matching + no `ORDER BY`. Same file re-scored 3×: **51.8 / 52.0 / 52.5** (documented 52.7). EX was stable across all three. | ✅ | OPEN |
+| **D-10** | measurement | `backend/tests/bird_eval.py:125-150` | **Soft-F1 is non-deterministic.** Positional row matching + no `ORDER BY`. Same file re-scored 3×: **51.8 / 52.0 / 52.5** (documented 52.7). EX was stable across all three. | ✅ | ✅ FIXED |
 | **D-11** | measurement | `backend/tests/bird_eval.py:73` | **Strict EX flips on float aggregates.** Same SQL, same data, 5 consecutive runs: **2 of 5 disagreed** (`459.9562642112432` vs `459.95626421124325`, column type `real`). ±1 question of irreducible noise. | ✅ | OPEN |
 
 ---
@@ -97,7 +98,7 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 
 | ID | Severity | Location | Issue | Evidence | Status |
 |---|---|---|---|---|---|
-| **E-01** | P1 | `bird_eval.py:125` | Soft-F1 order-sensitive → ±1 pp noise. Same as **D-10**. | ✅ | OPEN |
+| **E-01** | P1 | `bird_eval.py:125` | Soft-F1 order-sensitive → ±1 pp noise. Same as **D-10**. | ✅ | ✅ FIXED (same as D-10) |
 | **E-02** | P1 | `bird_eval.py:73` | Strict EX flips on float aggregates. Same as **D-11**. | ✅ | OPEN |
 | **E-03** | P1 | `bird_eval.py:373, 688, 216, 540` | The harness **re-implements four production capabilities** — identifier check, join graph, value sampling, repair loop — and calls none of the product code. `--mode model --all-fixes` measures a third system that does not ship. | 📖 | OPEN |
 | **E-04** | P1 | `bird_eval.py:885` | `--finish sql` (the default) **cancels self-consistency and never runs the execution-retry loop or the grader**. The shipping configuration has never been benchmarked. | 📖 | OPEN |
