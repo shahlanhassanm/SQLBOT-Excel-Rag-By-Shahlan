@@ -37,6 +37,11 @@ class BaseUserDTO(BaseUser, BaseCreatorDTO):
     status: int = 1
     origin: int = 0
     name: str
+    # The mcp_assistant path (mcp.py:163) builds THIS DTO, not UserInfoDTO, so
+    # without the field the permission gate fell back to its getattr default.
+    # Declaring it makes the gate read a real value, and False means
+    # "not an admin" -> permissions ARE enforced (AUDIT D-37).
+    isAdmin: bool = False
 
     def to_dict(self):
         return {

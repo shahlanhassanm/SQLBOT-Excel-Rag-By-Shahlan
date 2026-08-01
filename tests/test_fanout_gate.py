@@ -12,9 +12,10 @@ comment already stated: "not a row-permission restricted user". Secondary legs
 bypass the permission rewrite (_run_secondary_leg never calls generate_filter),
 so this must fail CLOSED.
 
-NOTE: the global is_normal_user() predicate is deliberately NOT changed here —
-that is option 2 and remains a separately tracked issue pending an audit of
-every UserInfoDTO construction site.
+NOTE: option 2 — retargeting the global is_normal_user() predicate from
+`id != 1` to `isAdmin` — has since SHIPPED as D-37, after the required audit of
+every UserInfoDTO/BaseUserDTO construction site. The matrix for it lives in
+tests/test_authz_matrix.py; this file keeps covering the fanout gate only.
 
 Run in-container:
     docker exec sqlbot sh -c "cd /opt/sqlbot/app && \

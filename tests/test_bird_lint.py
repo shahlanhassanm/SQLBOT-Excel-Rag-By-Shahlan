@@ -19,10 +19,33 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # hardcodes `dirname(dirname(__file__))/...`, which is why 25 of its tests fail
 # the moment they run anywhere but a checkout root -- including inside the
 # container the harness actually runs in. Look in the deployed location too.
+def _repo_harness():
+    """Nearest ancestor holding backend/tests/bird_eval.py.
+
+    PROJECT_ROOT is dirname(dirname(__file__)), which under the documented
+    in-container workflow is /tmp -- so the repo candidate never matched and
+    resolution fell through to /tmp/bird_eval.py. That path is ALSO where the
+    benchmark supervisor stages its own copy, so this file tested whichever
+    harness last landed in /tmp rather than the repo's, and went green or red
+    depending on run order (same failure family as AUDIT D-19).
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        cand = os.path.join(d, "backend", "tests", "bird_eval.py")
+        if os.path.exists(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            return ""
+        d = parent
+
+
 _CANDIDATES = [
     os.environ.get("BIRD_EVAL_PATH", ""),
+    _repo_harness(),
     os.path.join(PROJECT_ROOT, "backend", "tests", "bird_eval.py"),
-    "/tmp/bird_eval.py",
+    "/opt/sqlbot/app/tests/bird_eval.py",   # deployed copy
+    "/tmp/bird_eval.py",                    # last resort: staged by the supervisor
 ]
 BIRD_EVAL = next((p for p in _CANDIDATES if p and os.path.exists(p)), "")
 
