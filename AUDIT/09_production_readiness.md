@@ -1,6 +1,8 @@
 # AUDIT / 09 — Production Readiness Summary
 
-State after the approved Phase 5 P1 batch. Branch `audit/phase5-fixes`.
+State after **all** approved Phase 5 batches (Groups A–G).
+Branch `audit/phase5-fixes`. Safety tag `pre-rewrite-phase5` intact.
+Supersedes the interim version written after the P1 batch.
 
 ---
 
@@ -11,138 +13,148 @@ has been introduced.
 
 ## 2. Remaining P1 issues
 
-| ID | Issue | Status | Why still open |
-|---|---|---|---|
-| **D-05** | `is_normal_user() → id != 1` lets user id 1 bypass all row/column permissions | **DEFERRED by decision** → tracked as **D-37** | Option 1 (fanout gate) shipped in `2af61e7`. Option 2 (retarget to `isAdmin`) requires auditing every `UserInfoDTO`/`BaseUserDTO` construction site incl. MCP and assistant paths, per your instruction |
-| **D-06** | Path traversal via `filePath` on `/reparseExcel` and `/importToDb` | **OPEN** | Not in the approved batch. The confinement helper it needs (`common/utils/paths.py`) already exists from D-07, so the fix is now small |
-| **D-10** | Soft-F1 is order-sensitive → ±0.7 pp run-to-run noise | **OPEN** | Harness fix (sort both row lists before matching). One line |
-| **D-11** | Strict EX flips on float aggregates (2 of 5 runs measured) | **WONTFIX by decision** | Official BIRD metric compatibility retained, as instructed. Documented; EX-tolerant adopted as internal KPI |
+| ID | Issue | Status |
+|---|---|---|
+| **D-37** | `is_normal_user() → id != 1` lets user id 1 bypass all row/column permissions | **DEFERRED by your decision.** Option 1 (fanout gate) shipped in `2af61e7`. Option 2 needs an audit of every `UserInfoDTO`/`BaseUserDTO` construction site incl. MCP and assistant paths |
+| **D-11** | Strict EX flips on float aggregates (2 of 5 runs measured) | **WONTFIX by your decision** — official BIRD metric compatibility retained. EX-tolerant adopted as the internal KPI |
+| **D-19** | 24 tests fail on a path assumption | **OPEN** — the only remaining test failures; one file, unchanged throughout |
+| **E-04** | The shipping pipeline configuration had never been benchmarked | **IN FLIGHT** — see §7 |
 
-**2 actionable P1s remain: D-06 and D-10.** Both are small and well-specified.
+Everything else raised as P1 is closed. **D-05 / D-06 / D-10 are now fixed**
+(D-06 in the path-confinement batch, D-10 in Group A, D-05 option 1 as approved).
 
-## 3. Accuracy delta
-
-| Metric | Before | After | Delta |
-|---|---:|---:|---:|
-| **BIRD EX (official)** | 52.0 % | **55.3 %** | **+3.3 pp** |
-| **BIRD EX (tolerant)** | 52.7 % | **56.0 %** | **+3.3 pp** |
-| Exact Match | 5.3 % | 5.3 % | 0 (not a meaningful metric here) |
-| Regressions | — | **0** | — |
-| Replication (gpt-oss:20b) | 40.7 % | 43.3 % | +2.7 pp, 0 regressions |
-
-Per difficulty: simple **+6.8 pp**, moderate **+2.7 pp**, challenging +0.0 pp.
-Cost: 1.5 ms/query CPU, **zero** extra model calls or tokens.
-
-Two further changes affect generation but are not separately quantified:
-**D-09** (answer-object selection) is a no-op unless a reply contains ≥2 JSON
-objects, and **D-05 opt 1** enables fanout for ordinary users — a capability
-change BIRD cannot measure, since it has no multi-file questions.
-
-## 4. Security delta
+## 3. Security delta
 
 | Issue | Before | After |
 |---|---|---|
 | **D-01** | Any workspace's spreadsheet rows could surface as another's answer | Vector search filtered to the caller's readable tables; **fails closed** |
 | **D-02** | Row-restricted users saw every row in prompt samples and value hints | Row rules applied on both paths; cache key includes the filter; **fails closed** |
-| **D-03** | Any user could run LLM analysis on any user's result set | Owner-scoped |
-| **D-04** | Any user could read another's question text and datasource history | Owner-scoped |
-| **D-07** | Arbitrary `*_error.xlsx` downloadable; 7 guards returned 500 not 4xx | Path confined; all guards return their intended status |
+| **D-03 / D-04** | Two IDORs: any user could run analysis on, or read, another user's records | Owner-scoped |
+| **D-06 / D-07 / D-38** | Path traversal on `filePath`, on `*_error.xlsx`, and on 4 upload endpoints writing via `filename.split('.')[0]` | All routed through `common/utils/paths.py`; a repo-wide write audit found no unprotected user-controlled write remaining |
 | **D-08** | Spreadsheet headers injected SQL on **every chat question** | Identifiers escaped through one function across all 14 dialects |
-| **D-13** | Value cache served privileged values to restricted users | Closed (value cache); relations cache still open |
-
-**6 of 8 P1 security issues closed.** Remaining: **D-06** (traversal, ws_admin
-gated) and **D-37** (id-1 permission bypass, deferred by decision).
+| **D-13** | Value **and** relations caches served privileged data across permission boundaries | Both cache keys now carry the permission dimension |
+| **D-25** | `SELECT 1; SELECT pg_sleep(30)` passed the read-only gate | Stacked statements rejected in every dialect |
 
 **No security control was weakened.** Every change is neutral or tightening, and
-every new gate fails closed.
+every new gate fails closed. The single deliberate exception is **D-37**, left
+untouched on your instruction.
+
+## 4. Correctness and resource delta
+
+| | Before | After |
+|---|---|---|
+| Bare `except:` in `backend/` | 5 | **0** |
+| Identifier-quoting implementations | 4 | **2** (one canonical + one delegating wrapper) |
+| Module-global threads on a `--workers 1` uvicorn | **400** (2 × 200, against `PG_POOL_SIZE=20`) | **96**, and configurable |
+| Rows serialised into a `Text` column | unbounded whenever `GENERATE_SQL_QUERY_LIMIT_ENABLED=false` (the shipped value) | capped at `AGENTIC_PERSISTED_ROW_CAP`, unconditionally |
+| Misconfigurations that boot silently wrong | 3 (`CACHE_TYPE=redis` w/o URL, dev CORS origin in prod, placeholder image host) | **0** — two are boot failures, one a startup warning |
+| Embedding-dimension mismatch | every insert failed, silently | boot-time check with remediation text |
 
 ## 5. Technical debt delta
 
 | | Before | After |
 |---|---:|---:|
-| Ruff violations (16 touched files) | 377 | **367** (−10) |
-| Mypy errors (16 touched files) | 841 | 843 (+2) |
-| Import cycles blocking standalone import | 1 (4 modules) | **0** |
-| Duplicate identifier-quoting implementations | 4 | **3** (one consolidated) |
-| Bare `except:` | 5 | **4** |
-| Hardcoded values removed | — | 2 new settings (`AGENTIC_NULLS_LAST_*`); no new hardcoding introduced |
+| Passing tests (root) | 272 | **585** |
+| Test files | 37 | **53** |
+| Security tests | **0** | ~70 |
+| Dead modules | 5 | **1** (`http_utils.py` — kept: xpack imports it) |
+| Dead code deleted | — | ~570 LOC incl. a 65-line commented endpoint |
+| Per-file ruff / mypy | baseline | **at or below baseline on every file touched** |
 
-Debt **reduced** on every axis except mypy, where +7 additions of two
-pre-existing error classes were partly offset by −5 removals.
+## 6. What the implementation proved wrong about the audit
 
-## 6. Test count and coverage delta
+Five register entries did not survive contact with the code and are corrected
+in `ISSUES.md`: **D-32** (`http_utils` is load-bearing), **D-33** (`terms` *is*
+created by migration 002), **D-15** (the stale LLM client was never *served*),
+**H-13** (no duplication exists), **D-26** (quote-doubling was already correct).
 
-| | Before | After | Delta |
-|---|---:|---:|---:|
-| Passing (root) | 272 | **392** | **+120** |
-| Passing (backend) | 28 | 28 | 0 |
-| Test files | 37 | **44** | +7 |
-| **Security tests** | **0** | **~70** | **+70** |
+The important one is D-32, because it is methodological:
 
-New files: `test_authz_chat_records.py`, `test_module_imports.py`,
-`test_path_confinement.py`, `test_row_rag_tenant_isolation.py`,
-`test_row_permission_context.py`, `test_identifier_quoting.py`,
-`test_extract_nested_json.py`, `test_fanout_gate.py`, `test_nulls_last.py`.
-
-The audit's **C-06** finding — "no security tests of any kind" — is now closed
-for the fixed issues. Coverage gaps **C-01 to C-05** (llm.py, curd/chat.py,
-db.py, auth.py, permission.py have no automated tests) are partly addressed:
-`curd/chat.py` and `permission.py` now have some, and D-36 made three of those
-modules importable and therefore testable at all.
+> `sqlbot_xpack` is Cython-compiled and its import strings are not recoverable
+> from the `.so` files. **No grep of this repository can prove a `common/`
+> module unused.** Only an empirical probe that force-imports all 50 xpack
+> submodules can. Deleting `http_utils.py` on grep evidence was a hard boot
+> failure; the probe is preserved in `tests/test_group_f_deadcode.py`.
 
 ## 7. Benchmark status
 
 | | |
 |---|---|
 | Eval-path integrity | ✅ Committed baseline re-scores identically after all changes |
+| Soft-F1 determinism (D-10 / E-01) | ✅ Fixed — rows sorted before matching |
+| Result provenance (E-06) | ✅ Added — model, flags, git rev, timestamp |
 | L-A validated | ✅ +3.3 pp, 0 regressions, replicated on a second baseline |
-| Shipping pipeline benchmarked | ❌ **Still never run** (`--finish data`) — audit **E-04** |
+| **E-04 shipping-config run** | 🔄 **IN FLIGHT** — gpt-oss:20b then qwen2.5-coder:32b-20k, 150 questions each, `--mode pipeline --finish data` |
 | Product-surface benchmark | ❌ **Does not exist** — Excel ingestion, fanout, permissions, multi-turn, charting all unmeasured |
 
-## 8. Production readiness
+**Do not read partial benchmark numbers as a verdict.** At n=29 the in-flight
+gpt-oss run showed churn in *both* directions against all three stored gpt-oss
+baselines (4 gained / 4 lost against two of them). That is consistent with the
+documented non-determinism of this pipeline — SQL generation runs at temperature
+0.6 — not evidence of a regression or an improvement. The comparison that counts
+is full-run vs full-run with McNemar, at n=150.
 
-**~70 %** — up from an estimated ~45 % at the start of Phase 5.
+The three smoke questions run immediately after the final commit matched the
+same-model baseline **exactly** (q12/q27/q32 are all WRONG in
+`bird_32b20k_150.json` too). That is the evidence that these changes did not
+break the pipeline.
 
-The number is a judgement, so here is what it is made of.
+### The 500-question runs
 
-**What is ready**
-- No P0 issues; 6 of 8 P1 security issues closed, all fail-closed
-- Deterministic test suite, zero flakes across 3× runs, +120 tests
-- Clean startup, healthy container, no regressions on any gate
-- Measured accuracy improvement with zero regressions
+Two prerequisites are missing, neither resolvable from the code:
 
-**What blocks 100 %**
+1. **`mini_dev_postgresql.json` (500 questions) is not on disk.** Only the
+   sampled 150-subset is. `bird_make_subset.py` built it from that file via
+   `--src`, seeded, preserving the 30/50/20 difficulty split and per-database
+   proportions — so the subset is representative by construction.
+2. **GPU time exceeds the licence window.** At measured rates (gpt-oss ≈ 173 s/q,
+   qwen20k ≈ 193 s/q), 500 questions on both models is **~40 h** against a vGPU
+   licence expiring 2026-08-02 07:50 GMT.
 
-| Blocker | Severity |
-|---|---|
-| **D-06** path traversal (ws_admin) still open | P1 |
-| **D-37** id-1 permission bypass deferred | P1 (by decision) |
-| **D-10** Soft-F1 non-determinism still open | P1 |
-| **The shipping pipeline configuration has never been benchmarked** (E-04) | P1 measurement |
-| Two 200-thread pools on a single-worker uvicorn (**D-14**) — unmeasured under load | P2 scalability |
-| Unbounded result sets persisted to a TEXT column (**D-16**) | P2 |
-| No dependency lockfile; default PyPI index is **plain HTTP**; `sqlbot-xpack` from testpypi | P2 supply chain |
-| `sqlbot_xpack` unauditable — closed source, inside the auth perimeter | Unknown |
-| No product-surface accuracy benchmark | P1 measurement |
-| ~25 P2 and 15 P3 issues untouched | mixed |
+Runs are resumable (`bird_run_supervised.sh` + `--resume`), so a licence lapse
+mid-run is recoverable rather than fatal.
 
-**Per your own criterion — "not production-ready unless all P0 and P1 issues are
-resolved" — the system is NOT production-ready.** Two actionable P1s (D-06,
-D-10) plus one deferred by decision (D-37) remain, and the configuration that
-actually ships has never been benchmarked.
+## 8. Production readiness verdict
 
-That said, the **security posture has improved materially**: cross-tenant data
-exposure, two IDORs, a traversal and a per-question SQL injection are closed and
-regression-tested.
+### NOT PRODUCTION READY — but materially closer
 
-## 9. Recommended next steps
+Against your stated criterion — *"only declare PRODUCTION READY if every gate
+passes"* — the system does not qualify. Three gates fail:
 
-1. **D-06** — small now that `common/utils/paths.py` exists (~30 min)
-2. **D-10** — one line in the harness, unlocks trustworthy Soft-F1
-3. **E-04 / L-D** — run `--mode pipeline --finish data` once (~10 h GPU). This is
-   the highest-value remaining item: every agentic-layer decision currently
-   rests on a measurement of a different configuration
-4. **D-37** — the `UserInfoDTO` construction-site audit, then option 2
-5. **D-14** — load-test the thread ceiling before any real concurrency
+| Blocker | Severity | Why it blocks |
+|---|---|---|
+| **D-37** id-1 permission bypass | P1 security | Deferred by your decision, not by evidence. A privileged-user bypass is exactly the class that must close before production |
+| **E-04** benchmark incomplete | P1 measurement | Every agentic-layer decision still rests on a measurement of a *different* configuration. Runs are in flight |
+| **D-19** 24 failing tests | P1 hygiene | A suite that cannot go green is not a usable release gate |
+
+Additional, unchanged by this work:
+
+- No dependency lockfile; the default PyPI index is **plain HTTP**;
+  `sqlbot-xpack` — a hard runtime dependency imported at `main.py:4` — comes
+  from **testpypi**, is closed source, and sits inside the auth perimeter
+- No product-surface accuracy benchmark. Excel ingestion, header/island
+  detection, cross-file fanout, row permissions, charting and multi-turn have
+  **no accuracy measurement of any kind**. Two defects found in this audit
+  (D-12, D-02) would have been caught immediately by one, and are invisible on
+  BIRD
+- ~25 P2 and 15 P3 issues untouched
+- The shipping default model is `qwen2.5-coder:32b-20k` — the variant this
+  project measured **worst** (35.3 % EX, against 52.0 % at full context)
+
+### What is ready
+
+No P0s. Cross-tenant data exposure, two IDORs, three classes of path traversal
+and a per-question SQL injection are closed and regression-tested. 585 passing
+tests including ~70 security tests where there were none. Debt down on every
+axis. Misconfiguration now fails at boot instead of running silently wrong.
+
+## 9. Recommended next steps, in order
+
+1. **D-19** — unbreak the 24 tests so the suite becomes a usable gate
+2. **E-04** — let the in-flight runs finish; compare full-run vs full-run
+3. **D-37** — the `UserInfoDTO` construction-site audit, then option 2
+4. **Change the shipping default model** off the 20k variant, or document why a
+   −16.7 pp configuration ships by default
+5. **Pin dependencies**, move the index to HTTPS, get `sqlbot-xpack` off testpypi
 6. Give the in-house 55-question bank gold SQL and set equality, so the
-   product's own differentiators become measurable
+   product's own differentiators become measurable at all
