@@ -181,9 +181,16 @@ class TokenMiddleware(BaseHTTPMiddleware):
     
     async def validateEmbedded(self, param: str, trans: I18n) -> tuple[any]:
         try: 
-            # WARNING: Signature verification is disabled for embedded tokens
-            # This is a security risk and should only be used if absolutely necessary
-            # Consider implementing proper signature verification with a shared secret
+            # First pass is UNVERIFIED on purpose, and only to read `appId` /
+            # `embeddedId` -- you cannot check a signature before you know which
+            # assistant's secret signed it. The payload is re-decoded below with
+            # `assistant_info.app_secret` and full verification, and only that
+            # second result is used. Same pattern as validateAskToken.
+            #
+            # (The comment previously here warned that verification was disabled
+            # and "a security risk". That was stale: the verified second decode
+            # exists. A false security warning is worse than none -- it invites a
+            # "fix" that would break embedded auth. AUDIT Q-18.)
             payload: dict = jwt.decode(
                 param,
                 options={"verify_signature": False, "verify_exp": False},
