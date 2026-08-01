@@ -21,11 +21,15 @@ One row per item. Detail lives in the phase document named in the last column.
 | **D-07** | ✅ **FIXED** | `740a5ff` | +13 |
 | **D-01** | ✅ **FIXED** | `4d15453` | +8 |
 | **D-02** | ✅ **FIXED** | `3b057a1` | +24 |
-| **D-13** (value-cache half) | ✅ **FIXED** | `3b057a1` | ↑ |
-| **D-05** | **BLOCKED — report delivered**, awaiting approval: `AUDIT/06_D05_authz_impact.md` | — | — |
+| **D-13** (value-cache half) | ⚠️ **PARTIAL** | `3b057a1` | ↑ |
+| **D-08** | ✅ **FIXED** | `35825f6` | +29 |
+| **D-09** | ✅ **FIXED** | `123f890` | +12 |
+| **D-05 option 1** / **D-12** | ✅ **FIXED** | `2af61e7` | +7 |
+| **D-05 option 2** | **DEFERRED — separately tracked** (see D-37) | — | — |
+| **L-A** | ✅ **FIXED + BENCHMARKED** | `0026e3d` `34886ee` | +15 |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
-Test count: **272 → 329 passing** (root suite), `backend/tests` 28/28 throughout.
+Test count: **272 → 392 passing** (+120) (root suite), `backend/tests` 28/28 throughout.
 Gates in force (approved): per-file no-new-ruff, per-file no-new-mypy,
 `import main` as build proxy, benchmarks only for changes that can affect SQL
 generation / retrieval / ranking / prompting / execution / evaluation.
@@ -43,8 +47,8 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | **D-05** | security · authz | `apps/datasource/crud/permission.py:76` | `is_normal_user() → id != 1`. User id 1 bypasses **all** row and column permissions regardless of role. Three different notions of "privileged" coexist in the codebase. | 📖 | OPEN |
 | **D-06** | security · traversal | `apps/datasource/api/datasource.py:584, 767` | `/reparseExcel` and `/importToDb` do `os.path.join(EXCEL_PATH, req.filePath)` with an unvalidated caller-supplied path; `/importToDb` then loads the file into Postgres and returns it. (`ws_admin` gated.) | 📖 | OPEN |
 | **D-07** | security · traversal + error handling | `apps/settings/api/base.py:2, 22, 25-30` | `/system/download-fail-info`: traversal via `req.file`; existence check runs **before** the extension check; and `from http.client import HTTPException` means every guard returns **500** instead of 4xx. Same wrong import at `apps/system/crud/user_excel.py:4`. | 📖 | ✅ FIXED `740a5ff` |
-| **D-08** | security · SQL injection | `apps/datasource/crud/datasource.py:530, 534-544, 350-388` | Field/table names interpolated into SQL with hand-written quotes and **no quote-escaping**. Names originate from spreadsheet headers, which `region_columns` does not sanitise. Fires on **every chat question** via `get_table_sample_data`, not just admin screens. | 📖 | OPEN |
-| **D-09** | correctness | `common/utils/utils.py:60-80` | `extract_nested_json` returns the **first** balanced JSON object in the model's output, not the answer. Affects every SQL parse, chart parse, brief and chart-type extraction. Also a bare `except:`. The repo's own harness uses the opposite convention (`m[-1]`). | 📖 | OPEN |
+| **D-08** | security · SQL injection | `apps/datasource/crud/datasource.py:530, 534-544, 350-388` | Field/table names interpolated into SQL with hand-written quotes and **no quote-escaping**. Names originate from spreadsheet headers, which `region_columns` does not sanitise. Fires on **every chat question** via `get_table_sample_data`, not just admin screens. | 📖 | ✅ FIXED `35825f6` |
+| **D-09** | correctness | `common/utils/utils.py:60-80` | `extract_nested_json` returns the **first** balanced JSON object in the model's output, not the answer. Affects every SQL parse, chart parse, brief and chart-type extraction. Also a bare `except:`. The repo's own harness uses the opposite convention (`m[-1]`). | 📖 | ✅ FIXED `123f890` |
 | **D-10** | measurement | `backend/tests/bird_eval.py:125-150` | **Soft-F1 is non-deterministic.** Positional row matching + no `ORDER BY`. Same file re-scored 3×: **51.8 / 52.0 / 52.5** (documented 52.7). EX was stable across all three. | ✅ | OPEN |
 | **D-11** | measurement | `backend/tests/bird_eval.py:73` | **Strict EX flips on float aggregates.** Same SQL, same data, 5 consecutive runs: **2 of 5 disagreed** (`459.9562642112432` vs `459.95626421124325`, column type `real`). ±1 question of irreducible noise. | ✅ | OPEN |
 
@@ -54,8 +58,9 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 
 | ID | Category | Location | Issue | Evidence | Status |
 |---|---|---|---|---|---|
-| **D-12** | functional | `apps/chat/task/llm.py:1061` | **Cross-datasource fanout/split is dead for every user except id 1** — `if is_normal_user(...): return single`. The headline multi-file feature, documented as active in `important.md`, never runs for real accounts. | 📖 | OPEN |
+| **D-12** | functional | `apps/chat/task/llm.py:1061` | **Cross-datasource fanout/split is dead for every user except id 1** — `if is_normal_user(...): return single`. The headline multi-file feature, documented as active in `important.md`, never runs for real accounts. | 📖 | ✅ FIXED `2af61e7` |
 | **D-13** | correctness · cache | `apps/datasource/relations.py:567`, `apps/datasource/value_index.py:139` | Cache keys omit the permission dimension. Relations cached from user A's column-filtered view are served to user B for 3600 s; value caches serve privileged cell values to restricted users. | 📖 | ⚠️ PARTIAL `3b057a1` (value cache fixed; relations cache still open) |
+| **D-37** *(new)* | security · authz | `apps/datasource/crud/permission.py:96` | **D-05 option 2, deferred by decision.** `is_normal_user() → id != 1` still lets user id 1 bypass all row/column permissions. Retargeting to `isAdmin` (a strict subset — can only tighten) requires auditing every `UserInfoDTO`/`BaseUserDTO` construction site first, incl. MCP and assistant paths. See `AUDIT/06_D05_authz_impact.md` §8 option 2. | 📖 | OPEN |
 | **D-14** | scalability | `apps/chat/task/llm.py:75`, `common/utils/embedding_threads.py:6` | Two module-global `ThreadPoolExecutor(max_workers=200)` = 400 threads on a `--workers 1` uvicorn. Each can hold a DB session, a `NullPool` datasource connection and an LLM stream. `PG_POOL_SIZE=20` does not bound it. | 📖 | OPEN |
 | **D-15** | correctness · cache | `apps/ai_model/model_factory.py:138` | `@lru_cache(maxsize=32)` on `create_llm` is never invalidated; a rotated API key leaves the old authenticated client resident indefinitely. | 📖 | OPEN |
 | **D-16** | resource · data | `apps/chat/task/llm.py:2006-2019` | `save_sql_data` truncates to 1000 rows **only when `enable_sql_row_limit` is true** — which compose sets to `false`. Unbounded result sets are serialised into a `Text` column. The compose comment justifying the flag cites this cap, circularly. | 📖 | OPEN |
