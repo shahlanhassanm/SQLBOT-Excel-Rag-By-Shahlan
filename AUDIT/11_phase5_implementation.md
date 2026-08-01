@@ -17,8 +17,9 @@ All work validated in the live `sqlbot` container.
 | G | Config validation & tunables | H-01, H-02, H-03, H-06, H-08, H-09, H-10, H-12, H-14 | `732478f` |
 | G2 | Consolidation & locale | H-11, H-16, H-17, H-19 | `40afb8e` |
 
-Test suite: **272 → 585 passing** (+313). The 24 pre-existing failures are all
-**D-19** (one file, path fragility) and are unchanged throughout. `backend/tests`
+Test suite: **272 → 634 passing** (+362), **0 failures**, deterministic across
+repeated runs. The 24 pre-existing failures were all **D-19** (one file, path
+fragility) and were closed in `20bb1f0`. `backend/tests`
 stayed 28/28 at every step. Per-file `ruff`/`mypy` finished **at or below
 baseline for every file touched**; two files improved materially
 (`engine.py` ruff 7→0, mypy 23→4; `datasource.py` mypy 112→107).
@@ -91,7 +92,8 @@ Not everything in the register was equally real. These were:
 
 ## 4. Deliberately not implemented
 
-Per your instruction, **D-37, D-39, D-11 and Q-01…Q-18 were not touched.**
+Per your instruction at the time, **D-39, D-11 and Q-01…Q-18 were not touched.**
+(**D-37 was later approved and implemented** — see `86079bd` + `33bb500`.)
 In addition, these were documented rather than guessed at, because the correct
 answer is a deployment or architecture decision not derivable from the code:
 
@@ -125,6 +127,11 @@ No code is touched by that commit.
 
 ## 6. Benchmark status
 
-See `12_benchmark_final.md`. In short: the pipeline was re-verified end-to-end
-after all seven commits, and the three smoke questions match the same-model
-baseline **exactly** (no regression). The full runs are in progress.
+The pipeline was re-verified end-to-end after all commits, and the three smoke
+questions match the same-model baseline **exactly** (no regression).
+
+**No post-fix benchmark has been run yet.** Launches were held after
+verification found two defects that would have invalidated the results — **D-40**
+(pipeline runs recorded a model they did not use) and **D-41** (the supervisor
+stacked five concurrent harnesses on one GPU). Both are fixed; see
+`09_production_readiness.md` §10.

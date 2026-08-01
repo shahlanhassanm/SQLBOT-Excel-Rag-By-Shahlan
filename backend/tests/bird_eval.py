@@ -996,6 +996,40 @@ def ask_pipeline(entry: dict, ds_id: int, finish: str = "sql") -> tuple[str, str
         return sql, (res.get("message") or "")[:200]
 
 
+def pipeline_model_in_use() -> str:
+    """The model `--mode pipeline` will ACTUALLY use.
+
+    Pipeline mode builds its SQL through LLMService, which reads SQLBot's own
+    configured model (the `ai_model` row with default_model = true). `--model`
+    only feeds the `chat()` helper used by `--mode model`, so a pipeline run
+    launched `--model gpt-oss:20b` silently ran whatever the database said --
+    while run_provenance recorded "gpt-oss:20b". A results file asserting a
+    model it did not use is worse than one asserting nothing, which is the whole
+    point of E-06 (AUDIT D-40).
+
+    Returns "" when the model cannot be determined, so provenance records
+    "unknown" rather than a guess.
+    """
+    # PG points at the BIRD data database (bird_dev); `ai_model` lives in
+    # SQLBot's own database, so override just the dbname.
+    params = dict(PG)
+    params["dbname"] = os.environ.get("SQLBOT_PG_DB", "sqlbot")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(**params, connect_timeout=10)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT base_model FROM ai_model WHERE default_model IS TRUE "
+                    "ORDER BY id LIMIT 1")
+                row = cur.fetchone()
+                return (row[0] or "").strip() if row else ""
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+
+
 def run_provenance(args: argparse.Namespace, model: str) -> dict[str, object]:
     """Everything needed to reproduce a run.
 
@@ -1014,8 +1048,31 @@ def run_provenance(args: argparse.Namespace, model: str) -> dict[str, object]:
             return ""
 
     flags = {k: v for k, v in sorted(vars(args).items()) if k not in ("out",)}
+
+    # In pipeline mode the model comes from the DB, not from --model (D-40).
+    # Record what will actually run, and keep the requested value alongside so a
+    # mismatch is visible in the file rather than silently resolved.
+    effective = model
+    requested = model
+    mismatch = None
+    if args.mode == "pipeline":
+        configured = pipeline_model_in_use()
+        effective = configured or "unknown"
+        # getattr: run_provenance is also called with synthetic Namespaces in
+        # tests, and must not require every argparse field to exist.
+        requested_flag = getattr(args, "model", "")
+        if configured and requested_flag and configured != requested_flag:
+            mismatch = (f"--model={requested_flag!r} was IGNORED: pipeline mode "
+                        f"uses the ai_model default {configured!r}")
+        elif not configured:
+            mismatch = "pipeline model could not be read from ai_model"
+
     return {
-        "model": model,
+        "model": effective,
+        "model_requested": requested,
+        "model_source": ("ai_model.default_model" if args.mode == "pipeline"
+                         else "--model/BIRD_MODEL"),
+        "model_mismatch": mismatch,
         "mode": args.mode,
         "flags": flags,
         "git_commit": _git("rev-parse", "HEAD"),
@@ -1142,6 +1199,15 @@ def main():
     done = set()
     _prov = run_provenance(args, model)
     _tag = run_tag(_prov)
+    # Say it out loud at launch, not only in the results file: a run that
+    # silently uses a different model than the operator asked for wastes hours
+    # of GPU and produces a mislabelled file (AUDIT D-40).
+    print(f"[model] mode={args.mode} using={_prov['model']!r} "
+          f"(source: {_prov['model_source']})")
+    if _prov.get("model_mismatch"):
+        print(f"[model] WARNING: {_prov['model_mismatch']}")
+        print("[model] To change the pipeline model, update the ai_model row "
+              "whose default_model is true; --model cannot do it.")
     if args.resume and os.path.exists(out_path):
         results = json.load(open(out_path))
         done = {r["question_id"] for r in results}

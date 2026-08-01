@@ -194,10 +194,26 @@ def test_run_tag_changes_when_a_flag_changes():
 
 
 def test_run_tag_changes_when_the_model_changes():
+    """Uses mode="model", the mode where the passed model actually selects the
+    model. In pipeline mode the model comes from the ai_model DB row, so two
+    runs differing only in --model use the SAME model and correctly share a tag
+    (AUDIT D-40) - asserting otherwise would pin the mislabelling bug."""
     import argparse
-    a = argparse.Namespace(mode="pipeline", finish="data", out="/x")
+    a = argparse.Namespace(mode="model", finish="data", out="/x", model="")
     assert bird.run_tag(bird.run_provenance(a, "model-A")) != \
            bird.run_tag(bird.run_provenance(a, "model-B"))
+
+
+def test_pipeline_tag_ignores_the_model_flag_because_the_flag_is_ignored():
+    """The companion property. In pipeline mode --model does not change what
+    runs, so it must not change the tag either - otherwise two identical runs
+    would look like different configurations to the E-08 resume guard."""
+    import argparse
+    a = argparse.Namespace(mode="pipeline", finish="data", out="/x", model="gpt-oss:20b")
+    b = argparse.Namespace(mode="pipeline", finish="data", out="/x", model="qwen2.5-coder:32b-20k")
+    pa, pb = bird.run_provenance(a, "gpt-oss:20b"), bird.run_provenance(b, "qwen2.5-coder:32b-20k")
+    assert pa["model"] == pb["model"], "pipeline model must come from the DB, not --model"
+    assert pa["model_source"] == "ai_model.default_model"
 
 
 def test_provenance_records_what_is_needed_to_reproduce():

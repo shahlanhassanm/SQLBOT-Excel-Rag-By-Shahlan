@@ -248,7 +248,7 @@ comparison is unaffected.
 
 | | Before | After |
 |---|---:|---:|
-| **Tests passing (root)** | 272 | **392** (+120) |
+| **Tests passing (root)** | 272 | **634** (+362), 0 failures |
 | Tests passing (backend) | 28 | 28 |
 | Tests failing | 24 | 24 (all **D-19**, path fragility, not a product defect) |
 | Skipped | 3 | 3 (`MINIMAX_API_KEY not set`) |
@@ -341,8 +341,8 @@ locales, sql_examples, `docker-compose.yaml`, `tests/test_sql_validate.py`,
 `tests/test_refusal_retry.py`, `tests/test_relations.py`, and the untracked
 `backend/tests/bird_*` harness files).
 
-Test suite: **585 passing**, 24 failing (all D-19), 4 skipped. `backend/tests`
-28/28.
+Test suite at that point: 585 passing, 24 failing (all D-19). **Now 634 passing,
+0 failures** after D-19 was closed in `20bb1f0`. `backend/tests` 28/28 throughout.
 
 ## Benchmarks in flight
 

@@ -15,10 +15,10 @@ has been introduced.
 
 | ID | Issue | Status |
 |---|---|---|
-| **D-37** | `is_normal_user() → id != 1` lets user id 1 bypass all row/column permissions | **DEFERRED by your decision.** Option 1 (fanout gate) shipped in `2af61e7`. Option 2 needs an audit of every `UserInfoDTO`/`BaseUserDTO` construction site incl. MCP and assistant paths |
+| **D-37** | `is_normal_user() → id != 1` lets user id 1 bypass all row/column permissions | ✅ **FIXED** (`86079bd` + `33bb500`) — retargeted to `isAdmin` after the construction-site audit. Tightens two principals, loosens none, provably cannot move a benchmark number |
 | **D-11** | Strict EX flips on float aggregates (2 of 5 runs measured) | **WONTFIX by your decision** — official BIRD metric compatibility retained. EX-tolerant adopted as the internal KPI |
-| **D-19** | 24 tests fail on a path assumption | **OPEN** — the only remaining test failures; one file, unchanged throughout |
-| **E-04** | The shipping pipeline configuration had never been benchmarked | **IN FLIGHT** — see §7 |
+| **D-19** | 24 tests fail on a path assumption | ✅ **FIXED** (`20bb1f0`) — suite is green: **634 passed, 0 failed**, deterministic |
+| **E-04** | The shipping pipeline configuration had never been benchmarked | **NOT STARTED** — held; see §7 |
 
 Everything else raised as P1 is closed. **D-05 / D-06 / D-10 are now fixed**
 (D-06 in the path-confinement batch, D-10 in Group A, D-05 option 1 as approved).
@@ -36,8 +36,9 @@ Everything else raised as P1 is closed. **D-05 / D-06 / D-10 are now fixed**
 | **D-25** | `SELECT 1; SELECT pg_sleep(30)` passed the read-only gate | Stacked statements rejected in every dialect |
 
 **No security control was weakened.** Every change is neutral or tightening, and
-every new gate fails closed. The single deliberate exception is **D-37**, left
-untouched on your instruction.
+every new gate fails closed. **D-37 has since been closed too** (`86079bd` +
+`33bb500`), after the construction-site audit you required: it tightens two
+principals and loosens none.
 
 ## 4. Correctness and resource delta
 
@@ -54,9 +55,9 @@ untouched on your instruction.
 
 | | Before | After |
 |---|---:|---:|
-| Passing tests (root) | 272 | **585** |
+| Passing tests (root) | 272 | **634**, 0 failures |
 | Test files | 37 | **53** |
-| Security tests | **0** | ~70 |
+| Security tests | **0** | ~90 across 11 files |
 | Dead modules | 5 | **1** (`http_utils.py` — kept: xpack imports it) |
 | Dead code deleted | — | ~570 LOC incl. a 65-line commented endpoint |
 | Per-file ruff / mypy | baseline | **at or below baseline on every file touched** |
@@ -84,7 +85,7 @@ The important one is D-32, because it is methodological:
 | Soft-F1 determinism (D-10 / E-01) | ✅ Fixed — rows sorted before matching |
 | Result provenance (E-06) | ✅ Added — model, flags, git rev, timestamp |
 | L-A validated | ✅ +3.3 pp, 0 regressions, replicated on a second baseline |
-| **E-04 shipping-config run** | 🔄 **IN FLIGHT** — gpt-oss:20b then qwen2.5-coder:32b-20k, 150 questions each, `--mode pipeline --finish data` |
+| **E-04 shipping-config run** | ⏸️ **HELD** — see the D-40/D-41 note below |
 | Product-surface benchmark | ❌ **Does not exist** — Excel ingestion, fanout, permissions, multi-turn, charting all unmeasured |
 
 **Do not read partial benchmark numbers as a verdict.** At n=29 the in-flight
@@ -116,16 +117,15 @@ mid-run is recoverable rather than fatal.
 
 ## 8. Production readiness verdict
 
-### NOT PRODUCTION READY — but materially closer
+### NOT PRODUCTION READY — one gate remains
 
 Against your stated criterion — *"only declare PRODUCTION READY if every gate
-passes"* — the system does not qualify. Three gates fail:
+passes"* — the system does not qualify. **One gate fails**, down from three:
+D-37 and D-19 are now closed.
 
 | Blocker | Severity | Why it blocks |
 |---|---|---|
-| **D-37** id-1 permission bypass | P1 security | Deferred by your decision, not by evidence. A privileged-user bypass is exactly the class that must close before production |
-| **E-04** benchmark incomplete | P1 measurement | Every agentic-layer decision still rests on a measurement of a *different* configuration. Runs are in flight |
-| **D-19** 24 failing tests | P1 hygiene | A suite that cannot go green is not a usable release gate |
+| **E-04** benchmark incomplete | P1 measurement | Every agentic-layer decision still rests on a measurement of a *different* configuration. **No post-fix run exists yet** — launches were held after verification found D-40/D-41 |
 
 Additional, unchanged by this work:
 
@@ -144,8 +144,8 @@ Additional, unchanged by this work:
 ### What is ready
 
 No P0s. Cross-tenant data exposure, two IDORs, three classes of path traversal
-and a per-question SQL injection are closed and regression-tested. 585 passing
-tests including ~70 security tests where there were none. Debt down on every
+and a per-question SQL injection are closed and regression-tested. **634 passing
+tests, 0 failures**, including ~90 security tests where there were none. Debt down on every
 axis. Misconfiguration now fails at boot instead of running silently wrong.
 
 ## 9. Recommended next steps, in order
@@ -158,3 +158,24 @@ axis. Misconfiguration now fails at boot instead of running silently wrong.
 5. **Pin dependencies**, move the index to HTTPS, get `sqlbot-xpack` off testpypi
 6. Give the in-house 55-question bank gold SQL and set equality, so the
    product's own differentiators become measurable at all
+
+
+---
+
+## 10. Why the benchmark has not run yet (added 2026-08-01)
+
+Verification before launch found two defects that would have invalidated the
+results, so the runs were stopped rather than allowed to finish:
+
+- **D-40** — `--model` is ignored in pipeline mode, but was written into
+  provenance anyway. A run launched `--model gpt-oss:20b` was actually running
+  `qwen2.5-coder:32b-20k` and would have produced a file claiming otherwise.
+  This also means the three historical `*_gptoss_*.json` pipeline files (bare
+  lists, no provenance) cannot be confirmed to be gpt-oss at all.
+- **D-41** — killing the supervisor on the host orphans the harness inside the
+  container. Relaunches stacked **five concurrent processes** on one GPU and one
+  output file, which is what froze the run on question 1.
+
+Both are fixed. The pipeline model is selected by the `ai_model` row whose
+`default_model` is true, so a two-model comparison requires flipping that row
+between runs — approved, not yet performed.
