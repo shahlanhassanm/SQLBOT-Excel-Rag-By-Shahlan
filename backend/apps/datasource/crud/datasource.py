@@ -186,12 +186,28 @@ def sync_single_fields(session: SessionDep, trans: Trans, id: int):
     fields = getFieldsByDs(session, ds, table.table_name)
     sync_fields(session, ds, table, fields)
 
+    # A single-table column refresh can rename/add/drop a key column; the
+    # cached join graph would serve the old shape for up to the TTL.
+    try:
+        from apps.datasource.relations import clear_cache
+        clear_cache(ds.id)
+    except Exception:
+        pass
+
     # do table embedding
     run_save_table_embeddings([table.id])
     run_save_ds_embeddings([ds.id])
 
 
 def sync_table(session: SessionDep, ds: CoreDatasource, tables: List[CoreTable]):
+    # The join graph is cached per datasource; a sync can add or drop tables, so
+    # drop the cached copy rather than serving a stale one for up to the TTL.
+    try:
+        from apps.datasource.relations import clear_cache
+        clear_cache(ds.id)
+    except Exception:
+        pass
+
     id_list = []
     for item in tables:
         statement = select(CoreTable).where(and_(CoreTable.ds_id == ds.id, CoreTable.table_name == item.table_name))
@@ -493,6 +509,9 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list) -> 
     reached, then every probed row still feeds the value profile. Short tables
     are therefore reproduced in full, while wide/long ones degrade to a few rows
     plus the distinct values that make their columns filterable.
+
+    TABLE_SAMPLE_CHAR_BUDGET bounds the WHOLE returned block (rows + value
+    profile), not just the rows — see the trim at the end of this function.
     """
     if not fields:
         return ""
@@ -558,13 +577,36 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list) -> 
             shown.append(row)
             used += size
 
-        parts = [json.dumps(shown, ensure_ascii=False, indent=2, default=str)]
+        # One compact object per line. `used` above is measured on the compact dump,
+        # so pretty-printing here (indent=2 previously) inflated the emitted block to
+        # ~3x what the budget accounted for — the single largest reason prompts ran
+        # into the context ceiling. One row per line stays readable to the model.
+        parts = ["[\n" + ",\n".join(
+            json.dumps(r, ensure_ascii=False, default=str) for r in shown) + "\n]"]
         if len(shown) < len(clean_rows):
             parts.append(f"# {len(shown)} of {len(clean_rows)} sampled rows shown; "
                          f"column values below cover all {len(clean_rows)}")
         profile = _column_value_profile(
             clean_rows, settings.TABLE_SAMPLE_DISTINCT_PER_COL, value_maxlen)
         if profile:
+            # `budget` above bounds only the JSON rows; the profile used to be
+            # appended unaccounted, so a table with budget=1200 really emitted
+            # ~4200 chars and the block was ~3.5x its nominal size. Trim the
+            # profile to the remaining budget so the setting bounds the whole
+            # per-table block. Whole lines only (a half-written value list would
+            # read as a real value), and at least one line always survives.
+            remaining = budget - sum(len(p) for p in parts) - len("# Column values:\n")
+            lines = profile.split("\n")
+            if remaining < len(profile):
+                kept, acc = [], 0
+                for line in lines:
+                    if kept and acc + len(line) + 1 > max(remaining, 0):
+                        break
+                    kept.append(line)
+                    acc += len(line) + 1
+                if len(kept) < len(lines):
+                    kept.append(f"  ... {len(lines) - len(kept)} more column(s) omitted")
+                profile = "\n".join(kept)
             parts.append("# Column values:\n" + profile)
         return "\n".join(parts)
     except Exception:
@@ -574,19 +616,41 @@ def get_table_sample_data(ds: CoreDatasource, table_name: str, fields: list) -> 
 
 def get_tables_sample_data(session: SessionDep, current_user: CurrentUser, ds: CoreDatasource,
                            table_list: list[str] = None) -> str:
-    """Get sample data (3 rows) for all tables to help AI understand the data"""
+    """Sample data for all selected tables, bounded in TOTAL as well as per table.
+
+    TABLE_SAMPLE_CHAR_BUDGET is per table, so the combined block grows with the
+    number of tables: measured at up to ~30k chars, which pushed 22% of LLM calls
+    into the model's 32k context ceiling and silently truncated the prompt (empty
+    answers rather than an error). TABLE_SAMPLE_TOTAL_CHAR_BUDGET caps the whole
+    block. The first table is always included even if it alone exceeds the cap, so
+    this can never return nothing.
+    """
     table_objs = get_table_obj_by_ds(session=session, current_user=current_user, ds=ds)
     if len(table_objs) == 0:
         return ""
 
+    total_budget = settings.TABLE_SAMPLE_TOTAL_CHAR_BUDGET
     sample_data_parts = []
+    used = 0
+    truncated = 0
     for obj in table_objs:
         if table_list is not None and obj.table.table_name not in table_list:
             continue
-        if obj.fields:
-            sample = get_table_sample_data(ds, obj.table.table_name, obj.fields)
-            if sample:
-                sample_data_parts.append(f"# Table: {obj.table.table_name}\n{sample}")
+        if not obj.fields:
+            continue
+        sample = get_table_sample_data(ds, obj.table.table_name, obj.fields)
+        if not sample:
+            continue
+        block = f"# Table: {obj.table.table_name}\n{sample}"
+        if total_budget > 0 and sample_data_parts and used + len(block) > total_budget:
+            truncated += 1
+            continue
+        sample_data_parts.append(block)
+        used += len(block)
+    if truncated:
+        SQLBotLogUtil.info(
+            f'sample data capped at {total_budget} chars: {truncated} table(s) omitted '
+            f'({len(sample_data_parts)} included, {used} chars)')
     return "\n".join(sample_data_parts)
 
 
@@ -611,6 +675,21 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
     tables = []
     all_tables = []  # temp save all tables
     table_name_list = []
+
+    # Join graph. Without it the model has to guess how tables relate, which is
+    # the largest measured error source; see apps/datasource/relations.py. Best
+    # effort by design -- a missing hint costs accuracy, an exception here would
+    # break SQL generation outright.
+    relations = {}
+    try:
+        from apps.datasource.relations import get_relations
+        relations = get_relations(
+            ds, db_name,
+            {obj.table.table_name: [f.field_name for f in (obj.fields or [])]
+             for obj in table_objs})
+    except Exception:
+        relations = {}
+
     for obj in table_objs:
         # 如果传入了table_list，则只处理在列表中的表
         if table_list is not None and obj.table.table_name not in table_list:
@@ -619,24 +698,28 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
         schema_table = ''
         no_schema_types = ["mysql", "es", "sqlite", "hive", "doris", "starrocks"]
         schema_table += f"# Table: {db_name}.{obj.table.table_name}" if ds.type not in no_schema_types and db_name else f"# Table: {obj.table.table_name}"
-        table_comment = ''
-        if obj.table.custom_comment:
-            table_comment = obj.table.custom_comment.strip()
+        table_comment = (obj.table.custom_comment or '').strip()
         if table_comment == '':
             schema_table += '\n[\n'
         else:
             schema_table += f", {table_comment}\n[\n"
 
+        # Canonical M-Schema puts the primary key inline in the column tuple
+        # ("(col:type, Primary Key, comment)") and foreign keys in the trailing
+        # 【Foreign keys】 block — the formats the specialist models were
+        # trained on. See apps/datasource/relations.py.
+        rel = relations.get(obj.table.table_name)
+        pk_cols = set(rel.primary_key) if rel else set()
+
         if obj.fields:
             field_list = []
             for field in obj.fields:
-                field_comment = ''
-                if field.custom_comment:
-                    field_comment = field.custom_comment.strip()
-                if field_comment == '':
-                    field_list.append(f"({field.field_name}:{field.field_type})")
-                else:
-                    field_list.append(f"({field.field_name}:{field.field_type}, {field_comment})")
+                parts = [f"{field.field_name}:{field.field_type}"]
+                if field.field_name in pk_cols:
+                    parts.append("Primary Key")
+                if field.custom_comment and field.custom_comment.strip():
+                    parts.append(field.custom_comment.strip())
+                field_list.append("(" + ", ".join(parts) + ")")
             schema_table += ",\n".join(field_list)
         schema_table += '\n]\n'
 
@@ -658,16 +741,51 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
             schema_str += s.get('schema_table')
             table_name_list.append(s.get('table_name'))
 
+    # Discovered join graph -> canonical 【Foreign keys】 lines. A kept table's
+    # edge may point at a table the embedding cut dropped; the join target is
+    # then almost certainly needed, so recover it into the schema (same "lost
+    # table" treatment the hand-configured relation path below has always done).
+    fk_lines = []
+    if relations:
+        kept = set(table_name_list)
+        by_name = {s.get('table_name'): s for s in all_tables}
+        changed = True
+        while changed:                      # a recovered table can itself reference another
+            changed = False
+            for tname in list(kept):
+                tr = relations.get(tname)
+                if not tr:
+                    continue
+                for r in tr.foreign_keys:
+                    if r.ref_table not in kept and r.ref_table in by_name:
+                        schema_str += by_name[r.ref_table].get('schema_table')
+                        table_name_list.append(r.ref_table)
+                        kept.add(r.ref_table)
+                        changed = True
+        for tname in table_name_list:
+            tr = relations.get(tname)
+            if not tr:
+                continue
+            for r in tr.foreign_keys:
+                if r.ref_table not in kept:
+                    continue
+                line = f"{r.table}.{r.column}={r.ref_table}.{r.ref_column}"
+                if r.source == "inferred":
+                    # M-Schema has no notion of a probabilistic FK — label
+                    # heuristic edges so the model can weigh them.
+                    line += f" (inferred, {r.confidence:.0%} value overlap)"
+                fk_lines.append(line)
+
     # field relation
     if tables and ds.table_relation:
-        relations = list(filter(lambda x: x.get('shape') == 'edge', ds.table_relation))
-        if relations:
+        manual_edges = list(filter(lambda x: x.get('shape') == 'edge', ds.table_relation))
+        if manual_edges:
             # Complete the missing table
             # get tables in relation, remove irrelevant relation
             embedding_table_ids = [s.get('id') for s in tables]
             all_relations = list(
                 filter(lambda x: x.get('source').get('cell') in embedding_table_ids or x.get('target').get(
-                    'cell') in embedding_table_ids, relations))
+                    'cell') in embedding_table_ids, manual_edges))
 
             # get relation table ids, sub embedding table ids
             relation_table_ids = []
@@ -701,10 +819,19 @@ def get_table_schema(session: SessionDep, current_user: CurrentUser, ds: CoreDat
             for ele in field_records:
                 field_dict[ele.id] = ele.field_name
 
-            if all_relations:
-                schema_str += '【Foreign keys】\n'
-                for ele in all_relations:
-                    schema_str += f"{table_dict.get(int(ele.get('source').get('cell')))}.{field_dict.get(int(ele.get('source').get('port')))}={table_dict.get(int(ele.get('target').get('cell')))}.{field_dict.get(int(ele.get('target').get('port')))}\n"
+            for ele in all_relations:
+                fk_lines.append(
+                    f"{table_dict.get(int(ele.get('source').get('cell')))}.{field_dict.get(int(ele.get('source').get('port')))}={table_dict.get(int(ele.get('target').get('cell')))}.{field_dict.get(int(ele.get('target').get('port')))}")
+
+    # One canonical block for every source of edges (discovered + hand-drawn),
+    # deduplicated — the same FK stated twice reads as two different facts.
+    if fk_lines:
+        seen = set()
+        schema_str += '【Foreign keys】\n'
+        for line in fk_lines:
+            if line not in seen:
+                seen.add(line)
+                schema_str += line + '\n'
 
     return schema_str, table_name_list
 

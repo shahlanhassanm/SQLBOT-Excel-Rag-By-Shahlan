@@ -41,7 +41,9 @@ from apps.chat.task.agentic import (build_result_preview, format_retry_feedback,
                                     is_retryable_single_message, parse_grader_verdict,
                                     parse_decomposition, merge_union, raise_sql_limit,
                                     is_listing_question, has_explicit_row_count,
-                                    result_fingerprint, select_by_consensus)
+                                    result_fingerprint, select_by_consensus,
+                                    REFUSAL_TAG as _REFUSAL_TAG, is_refusal_message,
+                                    strip_refusal_tag, refusal_retry_feedback)
 from apps.chat.task.sql_validate import (format_identifier_feedback,
                                          validate_sql_identifiers)
 
@@ -305,22 +307,25 @@ class LLMService:
             self.chat_question.db_schema, settings.PARALLEL_COLUMNS_HINT_ENABLED)
         if _parallel:
             _system_templates['rules'] = (_system_templates.get('rules') or '') + _parallel
+        # The scripted AI acknowledgments follow the user's language: injecting
+        # Chinese turns into an otherwise-English conversation primes the model
+        # toward Chinese and reads as noise to non-Chinese models.
         self.sql_message.append(SystemPromptMessage(content=_system_templates['system']))
         self.sql_message.append(HumanPromptMessage(content=_system_templates['rules']))
         self.sql_message.append(
-            AIPromptMessage(content='我已掌握所有规则，包括表结构、SQL规范、安全限制和输出格式，我会严格遵守这些规则。'))
+            AIPromptMessage(content=self.trans('i18n_chat.ack_rules')))
         self.sql_message.append(HumanPromptMessage(content=_system_templates['schema']))
         self.sql_message.append(
-            AIPromptMessage(content='我已确认您提供的数据库信息与表结构schema，我生成的SQL不会超出您提供的范围。'))
+            AIPromptMessage(content=self.trans('i18n_chat.ack_schema')))
         if _system_templates.get('custom_prompt'):
             self.sql_message.append(HumanPromptMessage(content=_system_templates['custom_prompt']))
-            self.sql_message.append(AIPromptMessage(content='我已确认您提供的额外信息，我会进行参考。'))
+            self.sql_message.append(AIPromptMessage(content=self.trans('i18n_chat.ack_extra')))
         if _system_templates.get('terminologies'):
             self.sql_message.append(HumanPromptMessage(content=_system_templates['terminologies']))
-            self.sql_message.append(AIPromptMessage(content='我已确认您提供的术语信息，我会进行参考。'))
+            self.sql_message.append(AIPromptMessage(content=self.trans('i18n_chat.ack_terminology')))
         if _system_templates.get('data_training'):
             self.sql_message.append(HumanPromptMessage(content=_system_templates['data_training']))
-            self.sql_message.append(AIPromptMessage(content='我已确认您提供的SQL示例，我会进行参考。'))
+            self.sql_message.append(AIPromptMessage(content=self.trans('i18n_chat.ack_training')))
 
         # Cross-datasource secondary legs (fanout/split) must NOT inherit prior
         # conversation history: that history contains SQL written against a
@@ -358,7 +363,7 @@ class LLMService:
         _chart_system_templates = self.chat_question.chart_sys_question()
         self.chart_message.append(SystemPromptMessage(content=_chart_system_templates['system']))
         self.chart_message.append(HumanPromptMessage(content=_chart_system_templates['rules']))
-        self.chart_message.append(AIPromptMessage(content='我已掌握所有规则，我会严格遵守这些规则来生成符合要求的JSON。'))
+        self.chart_message.append(AIPromptMessage(content=self.trans('i18n_chat.ack_chart_rules')))
         if last_chart_messages is not None and len(last_chart_messages) > 0:
             last_rounds = get_last_conversation_rounds(last_chart_messages, rounds=count_chart_limit)
 
@@ -880,6 +885,20 @@ class LLMService:
             traceback.print_exc()
             return True, ''
 
+    def _maybe_raise_limit(self, sql: str) -> str:
+        """Lift an over-small trailing LIMIT, but only for retrieval
+        ("list/show all X") questions — the lift exists to complete listings.
+        Applied unconditionally it turns a correct superlative answer
+        (`ORDER BY x DESC LIMIT 1`) into a 1000-row table. An explicit row
+        count in the question always wins over both paths."""
+        if has_explicit_row_count(self._original_question):
+            return sql
+        if not is_listing_question(self._original_question,
+                                   _csv_terms(settings.AGENTIC_LISTING_KEYWORDS),
+                                   _csv_terms(settings.AGENTIC_AGGREGATION_KEYWORDS)):
+            return sql
+        return raise_sql_limit(sql, settings.AGENTIC_FULL_RESULT_LIMIT)
+
     def _spawn_alt_candidate(self) -> Optional[Future]:
         """Kick off a blocking, structurally-different SQL candidate in parallel
         with the streamed regeneration (self-consistency: first working
@@ -914,8 +933,19 @@ class LLMService:
                     change_title=False)),
                 HumanMessage(self.chat_question.alt_candidate_hint()),
             ]
-            for _ in range(extra):
-                futures.append(executor.submit(self._invoke_llm_blocking, list(base)))
+            alt_llm = None
+            alt_name = (settings.AGENTIC_SELF_CONSISTENCY_MODEL or '').strip()
+            if alt_name and alt_name != self.config.model_name:
+                try:
+                    alt_llm = LLMFactory.create_llm(
+                        self.config.model_copy(update={'model_name': alt_name})).llm
+                except Exception:
+                    # a broken alternate must not cost the vote itself
+                    traceback.print_exc()
+            for i in range(extra):
+                futures.append(executor.submit(
+                    self._invoke_llm_blocking, list(base),
+                    alt_llm if (alt_llm is not None and i == 0) else None))
         except Exception:
             traceback.print_exc()
         return futures
@@ -964,23 +994,26 @@ class LLMService:
 
             timeout = max(1, settings.AGENTIC_SELF_CONSISTENCY_TIMEOUT)
             deadline = time.time() + timeout
+            dropped = {'timeout': 0, 'parse': 0, 'identifier': 0, 'execute': 0}
             for future in futures:
                 remaining = max(0.0, deadline - time.time())
                 try:
                     text, _, _ = future.result(timeout=remaining)
                 except Exception:
+                    dropped['timeout'] += 1
                     continue
                 candidate_sql = self._parse_candidate_sql(text)
                 if not candidate_sql:
+                    dropped['parse'] += 1
                     continue
                 if self.validate_identifiers(candidate_sql):
+                    dropped['identifier'] += 1
                     continue
-                execute_sql = candidate_sql
-                if not has_explicit_row_count(self._original_question):
-                    execute_sql = raise_sql_limit(execute_sql, settings.AGENTIC_FULL_RESULT_LIMIT)
+                execute_sql = self._maybe_raise_limit(candidate_sql)
                 try:
                     candidate_result = self.execute_sql(sql=execute_sql)
                 except Exception:
+                    dropped['execute'] += 1
                     continue
                 candidates.append({
                     'sql': candidate_sql,
@@ -992,6 +1025,9 @@ class LLMService:
                 })
 
             if len(candidates) < 2:
+                SQLBotLogUtil.info(
+                    f'self-consistency: no usable extra candidate '
+                    f'({len(futures)} spawned, dropped={dropped})')
                 return None
 
             winner = select_by_consensus(candidates)
@@ -999,7 +1035,7 @@ class LLMService:
                 return None
             SQLBotLogUtil.info(
                 f'self-consistency: {winner.get("votes")}/{winner.get("total_votes")} agreement '
-                f'across {len(candidates)} executed candidate(s)')
+                f'across {len(candidates)} executed candidate(s), dropped={dropped}')
             if winner.get('fingerprint') == candidates[0].get('fingerprint'):
                 return None
             return winner
@@ -1135,8 +1171,7 @@ class LLMService:
                     feedback = format_retry_feedback('parse', 'answer was not a valid SQL JSON object', None)
                     continue
                 # legs of a listing question: lift an over-small model LIMIT
-                if not has_explicit_row_count(self._original_question):
-                    leg_sql = raise_sql_limit(leg_sql, settings.AGENTIC_FULL_RESULT_LIMIT)
+                leg_sql = self._maybe_raise_limit(leg_sql)
                 try:
                     result = self.execute_sql(sql=leg_sql)
                 except Exception as e:
@@ -1194,13 +1229,17 @@ class LLMService:
     # ------------------------------------------------------------------
     # APEX-SQL: schema-agnostic logical planning with N=2 consensus
     # ------------------------------------------------------------------
-    def _invoke_llm_blocking(self, msgs: List[Union[BaseMessage, dict[str, Any]]]) -> tuple[str, str, dict]:
-        """Run a non-streamed LLM call and return (text, thinking, token_usage)."""
+    def _invoke_llm_blocking(self, msgs: List[Union[BaseMessage, dict[str, Any]]],
+                             llm: Optional[BaseChatModel] = None) -> tuple[str, str, dict]:
+        """Run a non-streamed LLM call and return (text, thinking, token_usage).
+
+        `llm` overrides the primary model for this one call (cross-model
+        self-consistency candidates); None uses the session's model."""
         text = ''
         thinking = ''
         token_usage: dict = {}
         try:
-            res = process_stream(self.llm.stream(msgs), token_usage)
+            res = process_stream((llm or self.llm).stream(msgs), token_usage)
             for chunk in res:
                 if chunk.get('content'):
                     text += chunk.get('content')
@@ -1591,6 +1630,19 @@ class LLMService:
                                                                                                 False) is True,
                                                                        'content': msg.content} for msg
                                                                       in self.sql_message])
+        # Prompt SIZE, not content (the content is already persisted in chat_log.messages).
+        # 22% of calls were measured at >=32k tokens against a 32,768 context, which
+        # truncates silently and yields an empty answer rather than an error, so the
+        # size is the number worth having in the log when an answer comes back empty.
+        # chars/token measured at ~2.9 on this workload (46,933 chars -> 16,222 real
+        # input_tokens), NOT the usual ~4: schema blocks are dense in identifiers,
+        # quotes and punctuation. Using 4 understated the true size by ~40%, which
+        # is exactly the wrong direction for a context-ceiling warning.
+        _prompt_chars = sum(len(str(getattr(m, 'content', '') or '')) for m in self.sql_message)
+        SQLBotLogUtil.info(
+            f'generate_sql prompt: {_prompt_chars} chars (~{int(_prompt_chars / 2.9)} tokens est) '
+            f'across {len(self.sql_message)} message(s)')
+
         full_thinking_text = ''
         full_sql_text = ''
         token_usage = {}
@@ -1808,7 +1860,13 @@ class LLMService:
             # SQL whenever it is present rather than hard-requiring the flag.
             if data.get('success') is False:
                 message = data.get('message') or 'The model declined to answer this question'
-                raise SingleMessageError(message)
+                # Tag refusals so the agentic loop can offer ONE best-effort retry
+                # before surfacing them. Measured on BIRD-150: qwen2.5-coder:32b
+                # refused 13 questions (8.7%) vs gpt-oss:20b's ~1, almost always by
+                # arguing with the question's hint ("the hint says MAX(dob) but
+                # youngest means MIN(dob)") rather than by lacking the schema. Those
+                # are recoverable; a second refusal still reaches the user.
+                raise SingleMessageError(f'{_REFUSAL_TAG}{message}')
             sql = data.get('sql')
             if not isinstance(sql, str):
                 raise KeyError('sql')
@@ -2173,6 +2231,7 @@ class LLMService:
             max_attempts = max(1, settings.AGENTIC_SQL_MAX_ATTEMPTS) if agentic_on else 1
             attempt = 0
             fallback_used = False
+            refusal_retried = False   # one best-effort nudge per question, max
             retry_feedback: Optional[str] = None
             pending_alt_text: Optional[str] = None
             alt_future: Optional[Future] = None
@@ -2321,12 +2380,12 @@ class LLMService:
                             yield json_result
                         return
 
-                    # Unless the user asked for a specific number of rows, lift an
-                    # over-small model LIMIT so the complete result is returned
-                    # (harmless for aggregations; display is capped downstream).
-                    if not has_explicit_row_count(self._original_question):
-                        real_execute_sql = raise_sql_limit(real_execute_sql,
-                                                           settings.AGENTIC_FULL_RESULT_LIMIT)
+                    # For retrieval ("list all X") questions without an explicit
+                    # row count, lift an over-small model LIMIT so the complete
+                    # result is returned (display is capped downstream). Gated on
+                    # is_listing_question: on a superlative/aggregation question
+                    # the model's LIMIT 1 IS the answer and must survive.
+                    real_execute_sql = self._maybe_raise_limit(real_execute_sql)
                     self.current_logs[OperationEnum.EXECUTE_SQL] = start_log(session=_session,
                                                                              operate=OperationEnum.EXECUTE_SQL,
                                                                              record_id=self.record.id,
@@ -2411,9 +2470,24 @@ class LLMService:
                         _failed_sql = locals().get('real_execute_sql') or locals().get('sql')
                     elif isinstance(agentic_e, SingleMessageError) and is_retryable_single_message(str(agentic_e)):
                         _retryable = True
-                        _stage, _detail = 'parse', str(agentic_e)[:1500]
+                        if is_refusal_message(str(agentic_e)):
+                            # A refusal is not a malformed answer: re-sending the
+                            # generic parse feedback would tell the model nothing.
+                            # Give it the specific "answer anyway" nudge, and only
+                            # once -- a model that refuses twice is surfaced.
+                            _stage = 'refusal'
+                            _detail = strip_refusal_tag(str(agentic_e))[:1500]
+                            if refusal_retried:
+                                _retryable = False
+                            refusal_retried = True
+                        else:
+                            _stage, _detail = 'parse', str(agentic_e)[:1500]
                     else:
                         _retryable = False
+                    # The refusal tag is an internal marker; a refusal that ends up
+                    # surfacing must reach the user as the model's own wording.
+                    if isinstance(agentic_e, SingleMessageError) and is_refusal_message(str(agentic_e)):
+                        agentic_e = SingleMessageError(strip_refusal_tag(str(agentic_e)))
                     # This attempt is being abandoned, so its consistency
                     # candidates are voting on a prompt we no longer trust.
                     if consistency_futures:
@@ -2421,7 +2495,7 @@ class LLMService:
                             _f.cancel()
                         consistency_futures = []
                     if not (agentic_on and _retryable):
-                        raise
+                        raise agentic_e   # sanitized above: never leak the internal refusal tag
                     # harvest the parallel alternative candidate, if one is cooking
                     if alt_future is not None:
                         try:
@@ -2456,8 +2530,9 @@ class LLMService:
                             retry_feedback = None
                             pending_alt_text = None
                             continue
-                        raise
-                    retry_feedback = format_retry_feedback(_stage, _detail, _failed_sql)
+                        raise agentic_e   # sanitized above: never leak the internal refusal tag
+                    retry_feedback = (refusal_retry_feedback(_detail) if _stage == 'refusal'
+                                      else format_retry_feedback(_stage, _detail, _failed_sql))
                     SQLBotLogUtil.info(
                         f'agentic retry {attempt}/{max_attempts}: stage={_stage} detail={_detail[:200]}')
                     if in_chat:

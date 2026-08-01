@@ -353,10 +353,45 @@ _RETRYABLE_MARKERS = (
     'SQL query is empty',
 )
 
+# Prefix stamped onto an explicit {'success': false} refusal by check_sql, so the
+# agentic loop can tell a refusal apart from a parse failure. Never shown to the
+# user -- strip_refusal_tag() removes it before the message surfaces.
+REFUSAL_TAG = '\x00refusal\x00'
+
+
+def is_refusal_message(msg: str) -> bool:
+    return bool(msg) and REFUSAL_TAG in msg
+
+
+def strip_refusal_tag(msg: str) -> str:
+    return msg.replace(REFUSAL_TAG, '') if msg else msg
+
+
+def refusal_retry_feedback(reason: str) -> str:
+    """Ask a refusing model for a best-effort answer instead of an objection.
+
+    Measured on BIRD-150: qwen2.5-coder:32b refused 13/150 questions where
+    gpt-oss:20b refused ~1, and the refusals were overwhelmingly the model
+    ARGUING with the question's hint rather than genuinely lacking schema
+    ("the hint says MAX(dob) but youngest means MIN(dob)"). One nudge converts
+    those into attempts; a model that refuses twice still reaches the user.
+    """
+    return (
+        "You returned {\"success\": false} with this objection:\n"
+        f"{strip_refusal_tag(reason)[:800]}\n\n"
+        "Do not refuse again unless the required tables or columns are genuinely "
+        "absent from the schema. If a hint looks wrong or imprecise, follow the "
+        "QUESTION's plain meaning and write the best SQL you can. If two readings "
+        "are possible, pick the more likely one and answer. Return SQL, not an "
+        "explanation."
+    )
+
 
 def is_retryable_single_message(msg: str) -> bool:
     if not msg:
         return False
+    if is_refusal_message(msg):
+        return True
     return any(marker in msg for marker in _RETRYABLE_MARKERS)
 
 

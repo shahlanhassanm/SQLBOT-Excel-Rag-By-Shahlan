@@ -155,6 +155,13 @@ class Settings(BaseSettings):
     AGENTIC_SELF_CONSISTENCY_ENABLED: bool = False
     AGENTIC_SELF_CONSISTENCY_N: int = 3          # total candidates incl. the first
     AGENTIC_SELF_CONSISTENCY_TIMEOUT: int = 180  # seconds to wait for the extra ones
+    # Cross-model voting: route the FIRST extra candidate to a different model on
+    # the same endpoint/credentials (e.g. 'qwen2.5-coder:7b'). Two models fail on
+    # different questions, so a vote across them covers strictly more than
+    # resampling the primary — and the tie-break still favours the primary, so
+    # the alternate can only win by corroborating one of its answers. Empty
+    # keeps every candidate on the primary model.
+    AGENTIC_SELF_CONSISTENCY_MODEL: str = ''
 
     # --- Value linking (CHESS-style cell retrieval, PRE-generation) ------------
     # Literals in a question ("Paid", "R&D", "GreenGrid Energy") are otherwise
@@ -191,9 +198,31 @@ class Settings(BaseSettings):
     # then visible as a filterable value no matter how deep that row sits, in any
     # domain (status, region, category, account code, ...).
     TABLE_SAMPLE_PROBE_ROWS: int = 50
-    TABLE_SAMPLE_CHAR_BUDGET: int = 3000
-    TABLE_SAMPLE_DISTINCT_PER_COL: int = 25
-    TABLE_SAMPLE_VALUE_MAXLEN: int = 100
+    TABLE_SAMPLE_CHAR_BUDGET: int = 1200
+    TABLE_SAMPLE_DISTINCT_PER_COL: int = 15
+    TABLE_SAMPLE_VALUE_MAXLEN: int = 60
+    # Ceiling on the COMBINED sample block across all tables. The per-table budget
+    # above is applied per table, so with TABLE_EMBEDDING_COUNT tables it multiplies:
+    # at the old 3000/table x 10 tables the sample block alone could reach 30k chars
+    # and 22% of LLM calls hit the model's 32k context ceiling, truncating the prompt
+    # and producing empty answers (NO-SQL 4 -> 13 on BIRD, 12 of them on the largest
+    # schema). This cap is the backstop that makes the total bounded regardless of
+    # table count. 0 disables it.
+    TABLE_SAMPLE_TOTAL_CHAR_BUDGET: int = 9000
+
+    # Statement (not connection) timeout for generated SQL, in seconds. 0 disables.
+    # connect_timeout only bounds opening the connection: without this one
+    # pathological generated query runs forever and pins a connection and a worker.
+    DS_STATEMENT_TIMEOUT: int = 120
+
+    # Hard cap on tokens the model may generate per call. 0 disables (previous
+    # behaviour). Without it a model that falls into a repetition loop generates
+    # until it exhausts the whole context window: measured on BIRD, one question
+    # burned ~9.5k tokens over 45 MINUTES emitting the same clause forever, and
+    # nothing could stop it. Greedy decoding (temperature 0) makes this more
+    # likely, not less, because there is no sampling noise to break the cycle.
+    # 1500 is far above any real SQL answer and turns that 45min into ~4min.
+    LLM_MAX_OUTPUT_TOKENS: int = 1500
     # "list all X" completeness: lift an over-small model LIMIT up to this cap.
     AGENTIC_FULL_RESULT_LIMIT: int = 1000
     # Fanout co-relevance: a datasource is a fanout candidate when its cosine is
@@ -268,6 +297,26 @@ class Settings(BaseSettings):
     ROW_RAG_REL_MARGIN: float = 0.06         # also drop rows >this far below the top hit
                                              # (keeps the relevant cluster, cuts cross-file noise)
 
+    # --- Join graph in the schema block ---------------------------------------
+    # The schema sent to the model lists columns and types but nothing about how
+    # tables relate, so joins are guessed. Measured on BIRD Mini-Dev that is the
+    # dominant error axis (1-table questions score ~2x 3-table ones; the two
+    # biggest buckets are extra-join and missing-join). Declared PK/FK are read
+    # from information_schema; spreadsheets have none, so edges are inferred from
+    # column naming plus real value overlap and marked as inferred in the prompt.
+    SCHEMA_RELATIONS_ENABLED: bool = True
+    SCHEMA_RELATIONS_INFER: bool = True       # inference for Excel/CSV (no FKs)
+    SCHEMA_RELATIONS_CACHE_TTL: int = 3600    # seconds; schemas change rarely
+    SCHEMA_RELATIONS_SAMPLE: int = 500        # distinct values probed per column
+    SCHEMA_RELATIONS_MIN_OVERLAP: float = 0.5  # |A∩B| / min(|A|,|B|) to accept
+    # Workbooks usually join a detail sheet to a summary sheet on a business
+    # label ("Category", "Region") with no key-shaped name anywhere, so those
+    # are admitted too -- but only on near-total value agreement.
+    SCHEMA_RELATIONS_MIN_OVERLAP_UNNAMED: float = 0.9
+    SCHEMA_RELATIONS_MIN_UNIQUENESS: float = 0.9  # parent side must look like a key
+    SCHEMA_RELATIONS_MAX_FANOUT: int = 6      # a column in >N tables is a label
+    SCHEMA_RELATIONS_MAX_PAIRS: int = 200     # probe budget per datasource
+
     ORACLE_CLIENT_PATH: str = '/opt/sqlbot/db_client/oracle_instant_client'
 
     @field_validator('SQL_DEBUG',
@@ -291,6 +340,8 @@ class Settings(BaseSettings):
                      'EMBEDDING_SAMPLE_ENABLED',
                      'EXCEL_FTS_ENABLED',
                      'DS_SUMMARY_ENABLED',
+                     'SCHEMA_RELATIONS_ENABLED',
+                     'SCHEMA_RELATIONS_INFER',
                      mode='before')
     @classmethod
     def lowercase_bool(cls, v: Any) -> Any:
