@@ -317,3 +317,87 @@ Then:
 | `AUDIT/09_production_readiness.md` | Readiness breakdown |
 | `AUDIT/ISSUES.md` | **Consolidated register — 90 items, statuses current** |
 | `AUDIT/tools/` | validate.sh, rescore.py, bench_la.py |
+
+---
+
+# Resuming after Groups A–G (2026-08-01)
+
+## Branch state
+
+```
+f79b003  docs(BENCHMARK-BIRD): correct the stale pipeline claim
+c556ba8  AUDIT: Phase 5 implementation report and updated readiness verdict
+40afb8e  Group G part 2: consolidation and locale/timezone coupling
+732478f  Group G: fail-fast config validation and tunables
+ec230eb  Group C: cache correctness and resource bounds
+6f13b28  Group F: dead code removal
+916ba94  AUDIT: commit the Phase 0-4 reports (00-05)
+17fbe1e  Group D: correctness fixes
+```
+
+Safety tag `pre-rewrite-phase5` intact. **25 files of the user's own work remain
+uncommitted and must stay that way** (`model_factory.py`, `sql_validate.py`,
+locales, sql_examples, `docker-compose.yaml`, `tests/test_sql_validate.py`,
+`tests/test_refusal_retry.py`, `tests/test_relations.py`, and the untracked
+`backend/tests/bird_*` harness files).
+
+Test suite: **585 passing**, 24 failing (all D-19), 4 skipped. `backend/tests`
+28/28.
+
+## Benchmarks in flight
+
+Two nohup'd host-side supervisors were running when this was written:
+
+```
+bash backend/tests/bird_run_supervised.sh /tmp/bird_gptoss_final.json \
+     --model gpt-oss:20b --timeout 900          # ~7 h,  log /tmp/sup_gptoss.out
+bash /tmp/chain_qwen.sh                          # waits, then qwen20k
+     -> /tmp/bird_qwen20k_final.json             # ~8 h,  log /tmp/sup_qwen.out
+```
+
+Check progress:
+
+```bash
+docker exec sqlbot python3 -c "import json;d=json.load(open('/tmp/bird_gptoss_final.json'));\
+ok=sum(1 for r in d if r.get('status')=='CORRECT');print(len(d),'/150',f'{100*ok/len(d):.1f}%')"
+```
+
+Both use `--mode pipeline --finish data --resume`, so a container restart or a
+vGPU licence lapse is recoverable — just re-run the same command.
+
+**When they finish**, copy the results into `backend/tests/bird_results/` and
+compare **full-run vs full-run** against `bird_pipeline_gptoss_150.json` (37.3 %)
+and `bird_32b20k_150.json` (35.3 %) using `backend/tests/bird_significance.py`.
+Do **not** compare partial runs: at n=29 the gpt-oss run showed 4 gained / 4 lost
+against two baselines, which is temperature-0.6 churn, not signal.
+
+## Traps that cost time in this session
+
+1. **`ruff` 0.15 output format.** Counting violations by grepping the summary
+   line silently returns 0 for every file. Use
+   `--output-format=concise | grep -c ':[0-9][0-9]*:[0-9][0-9]*:'`.
+2. **mypy line-shift noise.** Diffing mypy output between two file versions
+   shows every error as "new" because line numbers move. Compare **counts**, not
+   lines.
+3. **`git add -A backend/` sweeps in the user's uncommitted work.** Stage
+   explicit paths, and check `git diff --cached --name-only` before committing.
+4. **You cannot grep-prove a `common/` module dead** — see §6 of
+   `09_production_readiness.md`. Use the xpack import probe.
+5. **`docker exec` needs `-i`** to accept a heredoc on stdin; without it the
+   command silently produces no output.
+6. **Baseline choice decides whether you see a regression.** The smoke run
+   looked like 0/3 until compared against the *same model's* baseline, where
+   those three questions were already wrong. Always match the model.
+
+## Not implemented, by instruction
+
+`D-37`, `D-39`, `D-11`, `Q-01`…`Q-18`. Plus `H-04`, `H-05`, `H-07`, `H-18` and
+`D-22`, documented with rationale in `ISSUES.md` — all deployment-contract or
+architectural decisions rather than code fixes.
+
+## For the 500-question runs
+
+`mini_dev_postgresql.json` is **not on disk**; only the 150-subset is. Obtain it,
+then `bird_make_subset.py --src <it>` reproduces the subset exactly (SEED=0). At
+measured rates 500 questions is ~13 h on gpt-oss and ~27 h on qwen20k, so budget
+the vGPU licence accordingly.
