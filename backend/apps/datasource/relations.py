@@ -23,11 +23,12 @@ exception would break SQL generation entirely.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from common.core.config import settings
 from common.utils.utils import SQLBotLogUtil
@@ -94,6 +95,32 @@ def _cache_get(key: str):
 def _cache_put(key: str, value) -> None:
     with _cache_lock:
         _cache[key] = (time.time(), value)
+
+
+def _cache_key(ds: Any, schema: str,
+               tables: dict[str, list[str]] | None = None) -> str:
+    """Cache key for a join graph, including the caller's PERMITTED view.
+
+    `get_relations` filters its output down to `tables` -- the table/column set
+    this caller is allowed to see. Keying on datasource+schema alone therefore
+    served the first caller's filtered graph to everyone else for the whole TTL
+    (AUDIT D-13): a narrowly-permissioned user could be handed edges naming
+    tables they cannot query, and a broadly-permissioned one could silently lose
+    joins. The view is part of the identity of the cached value.
+
+    The digest is order-independent so that two callers with the same permitted
+    view share an entry -- otherwise the cache would never hit.
+    """
+    if tables is None:
+        view = "*"
+    else:
+        canonical = ";".join(
+            f"{name}({','.join(sorted(cols or []))})"
+            for name, cols in sorted(tables.items())
+        )
+        view = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    # ds_id stays the FIRST segment: clear_cache() prefix-matches on it.
+    return f"{getattr(ds, 'id', 0)}:{schema}:{view}"
 
 
 def clear_cache(ds_id: Optional[int] = None) -> None:
@@ -583,7 +610,7 @@ def get_relations(ds, schema: str,
     if not settings.SCHEMA_RELATIONS_ENABLED:
         return {}
 
-    key = f"{getattr(ds, 'id', 0)}:{schema}"
+    key = _cache_key(ds, schema, tables)
     cached = _cache_get(key)
     if cached is not None:
         return cached

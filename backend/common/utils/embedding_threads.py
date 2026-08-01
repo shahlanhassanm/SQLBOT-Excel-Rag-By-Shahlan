@@ -3,7 +3,9 @@ from typing import List
 
 from sqlalchemy.orm import sessionmaker, scoped_session
 
-executor = ThreadPoolExecutor(max_workers=200)
+from common.core.config import settings
+
+executor = ThreadPoolExecutor(max_workers=settings.EMBEDDING_EXECUTOR_MAX_WORKERS)
 
 from common.core.db import engine
 

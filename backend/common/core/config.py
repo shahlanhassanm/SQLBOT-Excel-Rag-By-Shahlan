@@ -123,6 +123,14 @@ class Settings(BaseSettings):
     DEFAULT_REASONING_CONTENT_END: str = '</think>'
 
     PG_POOL_SIZE: int = 20
+    # Module-global thread pools. These were two hardcoded 200-worker pools =
+    # 400 threads on a --workers 1 uvicorn, each able to hold a DB session, a
+    # NullPool datasource connection and an LLM stream, against a PG_POOL_SIZE
+    # of 20 (AUDIT D-14). Sized to leave headroom over the connection pool
+    # rather than to an arbitrary round number; raise if you also raise
+    # PG_POOL_SIZE.
+    LLM_EXECUTOR_MAX_WORKERS: int = 64
+    EMBEDDING_EXECUTOR_MAX_WORKERS: int = 32
     PG_MAX_OVERFLOW: int = 30
     PG_POOL_RECYCLE: int = 3600
     PG_POOL_PRE_PING: bool = True
@@ -251,6 +259,10 @@ class Settings(BaseSettings):
         '목록,모두,모든,전체,보여,표시')
     # Terms that make a nearby small number an EXPLICIT row request ("top 10",
     # "show 5 records", "상위 5개"), which suppresses the completeness LIMIT lift.
+    # Hard cap on rows serialised into the chat record's Text column. This is a
+    # STORAGE guard and is deliberately independent of enable_sql_row_limit,
+    # which governs whether generated SQL carries a LIMIT (AUDIT D-16).
+    AGENTIC_PERSISTED_ROW_CAP: int = 1000
     AGENTIC_ROW_COUNT_KEYWORDS: str = (
         'top,first,last,limit,bottom,head,'
         'record,records,row,rows,result,results,item,items,entry,entries,'

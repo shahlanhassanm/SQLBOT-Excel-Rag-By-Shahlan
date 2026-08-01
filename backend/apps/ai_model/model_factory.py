@@ -128,6 +128,17 @@ class LLMFactory:
         return llm_class(config)
 
     @classmethod
+    def clear_cache(cls) -> None:
+        """Evict every cached client. Call after rotating a credential.
+
+        LLMConfig.__hash__ already covers api_key, so a rotated key produces a
+        different cache entry and a fresh client is built -- the stale one is
+        never served. What was missing was any way to drop that stale client,
+        which holds the OLD credential, from memory (AUDIT D-15).
+        """
+        cls.create_llm.cache_clear()
+
+    @classmethod
     def register_llm(cls, model_type: str, llm_class: Type[BaseLLM]):
         """Register new model type"""
         cls._llm_types[model_type] = llm_class

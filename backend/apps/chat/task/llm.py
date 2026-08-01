@@ -72,7 +72,7 @@ from common.utils.utils import SQLBotLogUtil, extract_nested_json, prepare_for_o
 
 warnings.filterwarnings("ignore")
 
-executor = ThreadPoolExecutor(max_workers=200)
+executor = ThreadPoolExecutor(max_workers=settings.LLM_EXECUTOR_MAX_WORKERS)
 
 dynamic_ds_types = [1, 3]
 dynamic_subsql_prefix = 'select * from sqlbot_dynamic_temp_table_'
@@ -2066,10 +2066,15 @@ class LLMService:
     def save_sql_data(self, session: Session, data_obj: Dict[str, Any]):
         try:
             data_result = data_obj.get('data')
-            limit = 1000
+            # Storage guard, NOT the SQL-generation limit. `enable_sql_row_limit`
+            # decides whether the generated SQL carries a LIMIT; gating this cap
+            # on it meant that with GENERATE_SQL_QUERY_LIMIT_ENABLED=false (what
+            # docker-compose ships) an unbounded result set was serialised whole
+            # into a Text column (AUDIT D-16).
+            limit = settings.AGENTIC_PERSISTED_ROW_CAP
             if data_result:
                 data_result = prepare_for_orjson(data_result)
-                if data_result and len(data_result) > limit and self.enable_sql_row_limit:
+                if data_result and len(data_result) > limit:
                     data_obj['data'] = data_result[:limit]
                     data_obj['limit'] = limit
                 else:
