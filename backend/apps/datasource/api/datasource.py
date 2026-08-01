@@ -23,7 +23,7 @@ from common.audit.models.log_model import OperationType, OperationModules
 from common.audit.schemas.logger_decorator import LogConfig, system_log
 from common.core.config import settings
 from common.core.deps import SessionDep, CurrentUser, Trans
-from common.utils.paths import PathEscapeError, safe_join
+from common.utils.paths import PathEscapeError, safe_join, safe_upload_name
 from common.utils.utils import SQLBotLogUtil
 from ..crud.datasource import get_datasource_list, check_status, create_ds, update_ds, delete_ds, getTables, getFields, \
     update_table_and_fields, getTablesByDs, chooseTables, preview, updateTable, updateField, get_ds, fieldEnum, \
@@ -340,8 +340,15 @@ async def upload_excel(session: SessionDep, file: UploadFile = File(..., descrip
         raise HTTPException(400, "Only support .xlsx/.xls/.csv")
 
     os.makedirs(path, exist_ok=True)
-    filename = f"{file.filename.split('.')[0]}_{hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10]}.{file.filename.split('.')[1]}"
-    save_path = os.path.join(path, filename)
+    # AUDIT D-38: file.filename is attacker-controlled; an absolute name used to
+    # produce an absolute save_path and write outside the upload directory.
+    try:
+        filename = safe_upload_name(
+            file.filename, hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10],
+            UPLOAD_EXTENSIONS)
+        save_path = safe_join(path, filename, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
@@ -556,8 +563,15 @@ async def parse_excel(file: UploadFile = File(..., description=f"{PLACEHOLDER_PR
         raise HTTPException(400, "Only support .xlsx/.xls/.csv")
 
     os.makedirs(path, exist_ok=True)
-    filename = f"{file.filename.split('.')[0]}_{hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10]}.{file.filename.split('.')[1]}"
-    save_path = os.path.join(path, filename)
+    # AUDIT D-38: file.filename is attacker-controlled; an absolute name used to
+    # produce an absolute save_path and write outside the upload directory.
+    try:
+        filename = safe_upload_name(
+            file.filename, hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10],
+            UPLOAD_EXTENSIONS)
+        save_path = safe_join(path, filename, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
@@ -825,9 +839,16 @@ async def add_excel_datasource(session: SessionDep, trans: Trans, user: CurrentU
         raise HTTPException(400, "Only support .xlsx/.xls/.csv")
 
     os.makedirs(path, exist_ok=True)
-    stem, ext = os.path.splitext(os.path.basename(file.filename))
-    filename = f"{stem}_{hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10]}{ext}"
-    save_path = os.path.join(path, filename)
+    # Already basename-safe, but routed through the shared helper so there is
+    # exactly one filename construction in the codebase (AUDIT D-38).
+    stem, _ext = os.path.splitext(os.path.basename(file.filename))
+    try:
+        filename = safe_upload_name(
+            file.filename, hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10],
+            UPLOAD_EXTENSIONS)
+        save_path = safe_join(path, filename, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     with open(save_path, "wb") as f:
         f.write(await file.read())
 

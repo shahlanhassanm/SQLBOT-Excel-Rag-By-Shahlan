@@ -27,9 +27,9 @@ One row per item. Detail lives in the phase document named in the last column.
 | **D-05 option 1** / **D-12** | ✅ **FIXED** | `2af61e7` | +7 |
 | **D-05 option 2** | **DEFERRED — separately tracked** (see D-37) | — | — |
 | **L-A** | ✅ **FIXED + BENCHMARKED** | `0026e3d` `34886ee` | +15 |
-| **D-06** | ✅ **FIXED** | *(pending)* | +21 |
-| **D-38** *(new)* | OPEN — next | — | — |
-| **D-39** *(new)* | OPEN | — | — |
+| **D-06** | ✅ **FIXED** | `40cb518` | +21 |
+| **D-38** *(new)* | ✅ **FIXED** | *(pending)* | +43 |
+| **D-39** *(new)* | **WONTFIX — architectural** (cycle passes through closed-source `sqlbot_xpack`) | — | — |
 | **D-11** | **WONTFIX (by decision)** — official BIRD metric must stay compatible; documented instead, EX-tolerant adopted as internal KPI | — | — |
 
 Test count: **272 → 392 passing** (+120) (root suite), `backend/tests` 28/28 throughout.
@@ -63,8 +63,8 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 |---|---|---|---|---|---|
 | **D-12** | functional | `apps/chat/task/llm.py:1061` | **Cross-datasource fanout/split is dead for every user except id 1** — `if is_normal_user(...): return single`. The headline multi-file feature, documented as active in `important.md`, never runs for real accounts. | 📖 | ✅ FIXED `2af61e7` |
 | **D-13** | correctness · cache | `apps/datasource/relations.py:567`, `apps/datasource/value_index.py:139` | Cache keys omit the permission dimension. Relations cached from user A's column-filtered view are served to user B for 3600 s; value caches serve privileged cell values to restricted users. | 📖 | ⚠️ PARTIAL `3b057a1` (value cache fixed; relations cache still open) |
-| **D-38** *(new)* | security · traversal | `apps/datasource/api/datasource.py:339,555`, `apps/terminology/api/terminology.py:177`, `apps/data_training/api/data_training.py:172` | **Write-side traversal.** Four upload endpoints build the save path from `file.filename.split('.')[0]`, which is attacker-controlled. Measured: an **absolute** filename (`/etc/passwd.xlsx`) escapes `EXCEL_PATH` and is written outside it. `../` payloads happen to be neutralised by `split('.')` returning empty, but that is accidental. `/addExcelDatasource` is safe — it uses `os.path.basename`. | ✅ | OPEN |
-| **D-39** *(new)* | correctness · imports | `apps/datasource/api/datasource.py` -> `apps/db/db.py` -> `apps/system/crud/assistant.py` -> `common/utils/aes_crypto.py` -> `sqlbot_xpack/__init__.py` | `apps.datasource.api.datasource` cannot be imported standalone: `ImportError: cannot import name get_assistant_info`. Same class as D-36 but the cycle passes through **closed-source `sqlbot_xpack`**, so it is not fixable in this repo. Blocks unit-testing that module by import; the D-06 audit tests read source from disk instead. | ✅ | OPEN |
+| **D-38** *(new)* | security · traversal | `apps/datasource/api/datasource.py:339,555`, `apps/terminology/api/terminology.py:177`, `apps/data_training/api/data_training.py:172` | **Write-side traversal.** Four upload endpoints build the save path from `file.filename.split('.')[0]`, which is attacker-controlled. Measured: an **absolute** filename (`/etc/passwd.xlsx`) escapes `EXCEL_PATH` and is written outside it. `../` payloads happen to be neutralised by `split('.')` returning empty, but that is accidental. `/addExcelDatasource` is safe — it uses `os.path.basename`. | ✅ | ✅ FIXED |
+| **D-39** *(new)* | correctness · imports | `apps/datasource/api/datasource.py` -> `apps/db/db.py` -> `apps/system/crud/assistant.py` -> `common/utils/aes_crypto.py` -> `sqlbot_xpack/__init__.py` | `apps.datasource.api.datasource` cannot be imported standalone: `ImportError: cannot import name get_assistant_info`. Same class as D-36 but the cycle passes through **closed-source `sqlbot_xpack`**, so it is not fixable in this repo. Blocks unit-testing that module by import; the D-06 audit tests read source from disk instead. | ✅ | ⛔ WONTFIX (architectural) |
 | **D-37** *(new)* | security · authz | `apps/datasource/crud/permission.py:96` | **D-05 option 2, deferred by decision.** `is_normal_user() → id != 1` still lets user id 1 bypass all row/column permissions. Retargeting to `isAdmin` (a strict subset — can only tighten) requires auditing every `UserInfoDTO`/`BaseUserDTO` construction site first, incl. MCP and assistant paths. See `AUDIT/06_D05_authz_impact.md` §8 option 2. | 📖 | OPEN |
 | **D-14** | scalability | `apps/chat/task/llm.py:75`, `common/utils/embedding_threads.py:6` | Two module-global `ThreadPoolExecutor(max_workers=200)` = 400 threads on a `--workers 1` uvicorn. Each can hold a DB session, a `NullPool` datasource connection and an LLM stream. `PG_POOL_SIZE=20` does not bound it. | 📖 | OPEN |
 | **D-15** | correctness · cache | `apps/ai_model/model_factory.py:138` | `@lru_cache(maxsize=32)` on `create_llm` is never invalidated; a rotated API key leaves the old authenticated client resident indefinitely. | 📖 | OPEN |
@@ -115,6 +115,27 @@ generation / retrieval / ranking / prompting / execution / evaluation.
 | Headline numbers in `docs/BENCHMARK-BIRD.md` (40.7 / 52.0 / 43.3 %) | 3 | **All correct.** |
 
 ---
+
+## 3b. File-write entry-point audit (D-38 follow-up)
+
+Every write in `backend/` reviewed. `open(...,'w'/'wb')`, `Path.write_*`,
+`shutil.*`, `os.rename/replace/remove`, `to_excel`, `to_csv`,
+`NamedTemporaryFile`.
+
+| Site | Path source | Verdict |
+|---|---|---|
+| `datasource.py` `/uploadExcel`, `/parseExcel`, `/addExcelDatasource` | `file.filename` | ✅ **fixed** — `safe_upload_name` + `safe_join` |
+| `terminology.py` upload + error file | `file.filename` | ✅ **fixed** |
+| `data_training.py` upload + error file | `file.filename` | ✅ **fixed** |
+| `settings/api/base.py` download | `req.file` | ✅ fixed in D-07 |
+| `datasource.py` `/reparseExcel`, `/importToDb` | `req.filePath` | ✅ fixed in D-06 |
+| `header_detection.py:398` sidecar | `save_path + ".sqlbot_headers.json"` | ✅ justified — derives from an already-confined path |
+| `user_excel.py:188` | `tempfile.NamedTemporaryFile` | ✅ justified — OS-generated name |
+| `user_excel.py:332` `os.remove` | `_TEMP_FILE_MAP` registry | ✅ justified — server-generated uuid key, path confined to tempdir |
+| `to_excel(writer, ...)` ×7 | `io.BytesIO` | ✅ justified — in-memory, never touches disk |
+| `datasource.py:389,624` `to_csv` | `StringIO` | ✅ justified — in-memory |
+
+**No unprotected user-controlled write remains.**
 
 ## 4. P3 — Hygiene
 

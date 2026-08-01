@@ -251,3 +251,158 @@ def test_import_and_reparse_reject_traversal_extensions(base):
         safe_join(base, "/etc/passwd.xlsx", UPLOAD_EXTENSIONS)
     # a legitimate name still passes
     assert safe_join(base, "report.xlsx", UPLOAD_EXTENSIONS)
+
+
+# ===========================================================================
+# D-38 — uploaded-filename construction.
+#
+# Five endpoints built their save name as
+#     f"{file.filename.split('.')[0]}_{hash}.{file.filename.split('.')[1]}"
+# from the attacker-controlled Content-Disposition filename. An ABSOLUTE name
+# produced an absolute save path and os.path.join honoured it, writing outside
+# the upload directory. safe_upload_name is now the single implementation.
+# ===========================================================================
+
+from common.utils.paths import safe_upload_name  # noqa: E402
+
+XLSX = (".xlsx", ".xls", ".csv")
+SUF = "abcdef0123"
+
+
+def _built(original):
+    return safe_upload_name(original, SUF, XLSX)
+
+
+def test_normal_filename_is_unchanged_in_shape(base):
+    """Backward compatibility: the stored name format must not drift."""
+    assert _built("report.xlsx") == f"report_{SUF}.xlsx"
+    assert _built("Sales Q4.csv") == f"Sales Q4_{SUF}.csv"
+
+
+@pytest.mark.parametrize("original", [
+    "/etc/cron.d/evil.xlsx",          # absolute — the measured escape
+    "/tmp/evil.xlsx",
+    "../../evil.xlsx",                # relative traversal
+    "../evil.xlsx",
+    "a/../../../tmp/evil.xlsx",       # mid-path traversal
+    "subdir/evil.xlsx",               # subdirectory
+    "C:\\windows\\system32\\evil.xlsx",  # windows drive
+    "\\\\server\\share\\evil.xlsx",      # UNC
+    "..\\..\\evil.xlsx",              # windows relative
+])
+def test_directory_components_are_stripped(original, base):
+    """Whatever the payload, the result is a bare filename that cannot escape."""
+    built = _built(original)
+    assert "/" not in built and "\\" not in built, f"separator survived: {built}"
+    assert built.startswith("evil_") or built.startswith("upload_"), built
+    resolved = safe_join(base, built, XLSX)
+    assert resolved.startswith(os.path.realpath(base) + os.sep)
+
+
+@pytest.mark.parametrize("original", [
+    "%2e%2e%2fevil.xlsx",             # encoded traversal
+    "%252e%252e%252fevil.xlsx",       # double-encoded
+])
+def test_encoded_traversal_is_literal_and_confined(original, base):
+    """Nothing decodes these, so they stay a literal (odd) filename inside base."""
+    assert safe_join(base, _built(original), XLSX).startswith(
+        os.path.realpath(base) + os.sep)
+
+
+def test_symlinked_upload_dir_still_confines(base, tmp_path):
+    """If EXCEL_PATH itself is a symlink, confinement must use the real path."""
+    real = tmp_path / "real_uploads"; real.mkdir()
+    link = tmp_path / "linked_uploads"
+    os.symlink(str(real), str(link))
+    got = safe_join(str(link), _built("report.xlsx"), XLSX)
+    assert got.startswith(os.path.realpath(str(real)) + os.sep)
+
+
+@pytest.mark.parametrize("bad", ["", "   ", None, ".", "..", "/", "\\"])
+def test_empty_and_degenerate_names_are_rejected(bad):
+    with pytest.raises(PathEscapeError):
+        _built(bad)
+
+
+@pytest.mark.parametrize("bad", [
+    "evil.exe", "evil.sh", "evil", "evil.xlsx.exe", "noext.",
+])
+def test_extension_allowlist_is_enforced(bad):
+    with pytest.raises(PathEscapeError):
+        _built(bad)
+
+
+def test_leading_dot_filenames():
+    """`.hidden.xlsx` must not stay hidden, and `.xlsx` alone has no stem."""
+    assert _built(".hidden.xlsx") == f"hidden_{SUF}.xlsx"
+    with pytest.raises(PathEscapeError):
+        _built(".xlsx")          # splitext -> ('.xlsx', '') : no extension
+
+
+def test_multiple_extensions_are_preserved():
+    """The old .split('.') turned this into `a_<hash>.tar` — a silent corruption."""
+    assert _built("a.tar.gz.xlsx") == f"a.tar.gz_{SUF}.xlsx"
+    assert _built("report.2026.01.csv") == f"report.2026.01_{SUF}.csv"
+
+
+@pytest.mark.parametrize("reserved", ["CON.xlsx", "PRN.xlsx", "NUL.xlsx",
+                                      "COM1.xlsx", "LPT1.xlsx", "aux.xlsx"])
+def test_windows_reserved_names_stay_confined(reserved, base):
+    """Not special on POSIX; assert they produce a confined ordinary file and
+    do not crash, so a Windows/SMB-mounted volume is the only open question."""
+    built = _built(reserved)
+    assert safe_join(base, built, XLSX).startswith(os.path.realpath(base) + os.sep)
+
+
+def test_extremely_long_filename_is_bounded():
+    """NAME_MAX is 255 BYTES; the old code could exceed it and raise OSError."""
+    built = _built("a" * 5000 + ".xlsx")
+    assert len(built.encode("utf-8")) <= 255, len(built.encode("utf-8"))
+    assert built.endswith(f"_{SUF}.xlsx")
+
+
+def test_long_multibyte_filename_is_bounded_in_bytes():
+    """A 3-byte-per-char stem hits NAME_MAX at ~85 chars, not 255."""
+    built = _built("\u6570\u636e" * 500 + ".xlsx")
+    assert len(built.encode("utf-8")) <= 255
+    built.encode("utf-8").decode("utf-8")     # must remain valid UTF-8
+
+
+def test_unicode_nfc_nfd_both_accepted(base):
+    import unicodedata
+    for form in ("NFC", "NFD"):
+        built = _built(unicodedata.normalize(form, "café.xlsx"))
+        assert safe_join(base, built, XLSX).startswith(os.path.realpath(base) + os.sep)
+
+
+def test_null_byte_in_upload_name_is_rejected():
+    with pytest.raises(PathEscapeError):
+        safe_join("/tmp", _built("a\x00b.xlsx"), XLSX)
+
+
+# --- every upload endpoint must use the shared implementation --------------
+
+@pytest.mark.parametrize("module", [
+    "apps/datasource/api/datasource.py",
+    "apps/terminology/api/terminology.py",
+    "apps/data_training/api/data_training.py",
+])
+def test_no_endpoint_builds_filenames_by_hand(module):
+    """Audits LIVE code only — commented-out blocks are dead and tracked by D-30."""
+    live = "\n".join(l for l in _source(module).splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "file.filename.split('.')" not in live, (
+        f"{module} still builds a filename from the raw upload name (D-38)")
+    assert "safe_upload_name(" in live, f"{module} must use the shared helper"
+
+
+@pytest.mark.parametrize("module", [
+    "apps/datasource/api/datasource.py",
+    "apps/terminology/api/terminology.py",
+    "apps/data_training/api/data_training.py",
+])
+def test_no_endpoint_writes_to_an_unconfined_path(module):
+    """Every `open(save_path, "wb")` must be preceded by a safe_join."""
+    src = _source(module)
+    if 'open(save_path, "wb")' in src:
+        assert "safe_join(path," in src, f"{module} writes without confinement"

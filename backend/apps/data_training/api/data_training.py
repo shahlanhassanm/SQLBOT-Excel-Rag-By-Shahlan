@@ -18,6 +18,7 @@ from apps.swagger.i18n import PLACEHOLDER_PREFIX
 from apps.system.schemas.permission import SqlbotPermission, require_permissions
 from common.core.config import settings
 from common.core.deps import SessionDep, CurrentUser, Trans
+from common.utils.paths import PathEscapeError, safe_join, safe_upload_name
 from common.utils.data_format import DataFormat
 from common.utils.excel import get_excel_column_count
 from common.audit.models.log_model import OperationType, OperationModules
@@ -151,6 +152,9 @@ async def excel_template(trans: Trans, current_user: CurrentUser):
 
 path = settings.EXCEL_PATH
 
+# Single source of truth for this module's accepted extensions (AUDIT D-38).
+UPLOAD_EXTENSIONS = (".xlsx", ".xls")
+
 from sqlalchemy.orm import sessionmaker, scoped_session
 from common.core.db import engine
 from sqlmodel import Session
@@ -167,9 +171,16 @@ async def upload_excel(trans: Trans, current_user: CurrentUser, file: UploadFile
         raise HTTPException(400, "Only support .xlsx/.xls")
 
     os.makedirs(path, exist_ok=True)
-    base_filename = f"{file.filename.split('.')[0]}_{hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10]}"
-    filename = f"{base_filename}.{file.filename.split('.')[1]}"
-    save_path = os.path.join(path, filename)
+    # AUDIT D-38: file.filename is attacker-controlled; an absolute name used to
+    # produce an absolute save_path and write outside the upload directory.
+    try:
+        filename = safe_upload_name(
+            file.filename, hashlib.sha256(uuid.uuid4().bytes).hexdigest()[:10],
+            UPLOAD_EXTENSIONS)
+        save_path = safe_join(path, filename, UPLOAD_EXTENSIONS)
+    except PathEscapeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    base_filename = os.path.splitext(filename)[0]
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
@@ -256,7 +267,9 @@ async def upload_excel(trans: Trans, current_user: CurrentUser, file: UploadFile
 
             df = pd.DataFrame(md_data, columns=_fields_list)
             error_excel_filename = f"{base_filename}_error.xlsx"
-            save_error_path = os.path.join(path, error_excel_filename)
+            # base_filename comes from the sanitised upload name, but confine the
+            # derived path too so no future edit can reintroduce an escape (D-38).
+            save_error_path = safe_join(path, error_excel_filename, (".xlsx",))
             # 保存 DataFrame 到 Excel
             df.to_excel(save_error_path, index=False)
 
