@@ -120,11 +120,22 @@ Committed raw per-question output lives in
 [backend/tests/bird_results/](../backend/tests/bird_results/). Recompute any row
 below straight from those files — nothing here is hand-copied.
 
-| File | Model | Harness flags | EX | EX (tol) | Soft-F1 | median |
-|---|---|---|---:|---:|---:|---:|
-| `bird_model.json` | `gpt-oss:20b` | none (baseline) | **40.7%** | 45.3% | 41.0 | 41 s |
-| `bird_final_32b.json` | `qwen2.5-coder:32b` | `--descriptions --promptfix --repairs 1` | **52.0%** | 52.7% | 52.7 | 38 s |
-| `bird_xiyan14b.json` | `XiYanSQL-QwenCoder-14B` | same | 43.3% | 44.7% | 41.8 | 24 s |
+| File | Model | Harness flags | EX | median | note |
+|---|---|---|---:|---:|---|
+| `bird_model.json` | `gpt-oss:20b` | none (baseline) | **40.7%** | 41 s | |
+| `bird_final_32b.json` | `qwen2.5-coder:32b` | `--descriptions --promptfix --repairs 1` | **52.0%** | 38 s | |
+| `bird_la_nullslast_32b.json` | `qwen2.5-coder:32b` | same **+ L-A** | **55.3%** | 38 s | best measured |
+| `bird_la_nullslast_gptoss.json` | `gpt-oss:20b` | + L-A | 43.3% | 41 s | L-A replication, +2.7 pp |
+| `bird_xiyan14b.json` | `XiYanSQL-QwenCoder-14B` | same | 43.3% | 24 s | 25 SQL-ERR — see AUDIT |
+| `bird_32b20k_150.json` | `qwen2.5-coder:32b-**20k**` | same | **35.3%** | 71 s | **the shipping default model** |
+| `bird_pipeline_gptoss_150.json` | `gpt-oss:20b` | `--mode pipeline` | 37.3% | 19 s | |
+| `bird_pipeline_v2_150.json` | `gpt-oss:20b` | `--mode pipeline` v2 prompt | 36.0% | 47 s | 13 NO-SQL |
+| `bird_postfix_gptoss_150.json` | `gpt-oss:20b` | `--mode pipeline` + postfix | 40.7% | 13 s | |
+| `bird_pipeline_32b_partial.json` | `qwen2.5-coder:32b` | `--mode pipeline` | 40.0% | 21 s | |
+
+`bird_qwen32b20k_150.json` is byte-identical to `bird_32b20k_150.json`
+(md5 `afb15069…`) — one experiment under two names, which is what motivated the
+run-provenance block now written into every new results file (AUDIT E-06/D-22).
 
 By difficulty (EX):
 
@@ -146,9 +157,28 @@ context, not of a model that is uniformly stronger. The 43.3% vs 40.7% gap
 between XiYanSQL-14B and the baseline is inside the interval and should be read
 as "no measured difference".
 
-`--mode pipeline` has no completed 150-question run — only a 12-question partial
-at ~250 s/question, which is why the full-pipeline-versus-raw-model comparison
-the [Modes](#modes) section describes is still open.
+**Correction (AUDIT Q-16).** The statement that `--mode pipeline` "has no
+completed 150-question run" was **stale**: four completed pipeline runs are
+committed (`bird_pipeline_gptoss_150`, `bird_pipeline_v2_150`,
+`bird_postfix_gptoss_150`, `bird_pipeline_32b_partial` — the last is a full 150
+despite its name). They land at **36–40.7 %**, i.e. pipeline mode measures
+*lower* than the same model in `--mode model`. Both were run with `--finish sql`,
+which stops before execution retries and voting, so they under-measure what the
+UI actually does; that is why **E-04** re-runs with `--finish data`.
+
+**The shipping default model is the worst-measured configuration.**
+`qwen2.5-coder:32b-20k` scores **35.3 %** against 52.0 % for the same model at
+full context — a −16.7 pp gap, with 15 NO-SQL answers caused by prompts
+overflowing the 20k window. This is a live production concern, not a benchmark
+artefact.
+
+**Metric stability.** Strict EX is *not* deterministic on this bank: it flips on
+float aggregates in 2 of 5 repeat runs (AUDIT D-11, WONTFIX — official-metric
+compatibility retained). Soft-F1 was order-sensitive and drifted ±0.7 pp until
+E-01 sorted both row lists before matching. **Only EX-tolerant is stable
+run-to-run**, which is why it is the internal KPI. Treat any single-run
+difference below ~3 pp as noise, and prefer McNemar on paired per-question
+outcomes over comparing headline percentages.
 
 ## Caveats
 
