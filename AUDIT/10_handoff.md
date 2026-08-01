@@ -14,7 +14,10 @@ Date: 2026-08-01 · Repo: `/home/iguser/Downloads/SQLBOT-Excel-Rag-main`
 |---|---|
 | **Current branch** | `audit/phase5-fixes` |
 | **Base commit** | `d2d83bb` (SQLBot Excel RAG: agentic text-to-SQL pipeline on top of dataease/SQLBot) |
-| **Completed range** | `d2d83bb..d98d5f5` — **14 commits** |
+| **Completed range** | `d2d83bb..e243141` — **16 commits** (history rewritten WIP-first 2026-08-01) |
+| **Pre-rewrite HEAD** | `d2a554d3f4363ee4e503d40207067fc73b1492e7` |
+| **Safety tag** | `pre-rewrite-phase5` -> `d2a554d` (rollback: `git update-ref refs/heads/audit/phase5-fixes pre-rewrite-phase5`) |
+| **Tree hash (unchanged by rewrite)** | `a48d00a1324d4186d1fc6937f42bffe68d8c340b` |
 | **Files changed** | 33 (7,296 insertions, 153 deletions) |
 | **Container** | `sqlbot:local`, restarted 2026-08-01 so uvicorn runs the new code; healthy |
 
@@ -36,7 +39,41 @@ docker-compose.yaml
 tests/test_sql_validate.py
 ```
 
-### ⚠️ Files modified this phase that ALSO carried pre-existing user changes
+### History rewrite — old SHA -> new SHA (2026-08-01, WIP-first)
+
+Your pre-existing work is now isolated in `657fad3` at the BASE of the branch,
+so every fix commit below contains only its own change.
+
+| Old | New | Commit |
+|---|---|---|
+| — | `657fad3` | **WIP: Preserve pre-existing local changes** |
+| `d27d3c4` | `747bf5f` | Fix: D-36 |
+| `cc8a208` | `b74b035` | Fix: D-03/D-04 |
+| `124f9cd` | `c47c36f` | Style: D-03/D-04 follow-up |
+| `740a5ff` | `ecd800b` | Fix: D-07 |
+| `4d15453` | `af936f2` | Fix: D-01 |
+| `562aa93` | `980f649` | Docs: register |
+| `3b057a1` | `d620b8c` | Fix: D-02 |
+| `2dae0cb` | `ae5a223` | Docs: D-05 report |
+| `35825f6` | `aa681b5` | Fix: D-08 |
+| `123f890` | `e18eca4` | Fix: D-09 |
+| `2af61e7` | `9f06449` | Fix: D-05 option 1 / D-12 |
+| `0026e3d` | `2cad175` | Fix: L-A |
+| `34886ee` | `7838ad0` | Bench: L-A validation |
+| `d98d5f5` | `8200b3a` | Docs: health check + readiness |
+| `d2a554d` | `e243141` | Docs: handoff + harness |
+
+Verified: tree hash identical, `git diff d2a554d e243141` empty, 392 tests
+passing, 159 routes, benchmark artifacts intact. **No implementation logic was
+rewritten** — every fix commit reuses its original blobs.
+
+**Why WIP-first rather than at the tip:** D-02 modifies
+`get_tables_sample_data()`, whose `TABLE_SAMPLE_TOTAL_CHAR_BUDGET` logic exists
+only in the pre-existing work (0 occurrences at `d2d83bb`, 2 in it), and L-A's
+`llm.py` hunks conflict 5 ways when rebased off it. Tip placement would have
+required rewriting benchmarked code.
+
+### ⚠️ HISTORICAL (pre-rewrite) — files that carried pre-existing user changes
 
 `git add <file>` cannot stage a subset and interactive staging is unavailable
 here, so these four commits contain the user's in-progress work alongside the
