@@ -162,7 +162,12 @@ def extract_identifiers(sql: str, dialect: Optional[str] = None) -> Optional[Dic
           'tables':  [table_name, ...],              # physical table refs only
           'columns': [(qualifier_or_None, col), ...],
           'locals':  {name, ...},   # CTE names, table aliases, output aliases
+          'aliases': {alias: table_name, ...},  # normalized alias -> real table
         }
+
+    ``aliases`` lets the caller attribute an alias-qualified column to the one
+    table it can belong to. Ambiguous aliases (the same alias declared for two
+    tables) are omitted rather than resolved to a guess.
 
     ``locals`` collects every name the statement defines for itself — CTE names,
     derived-table aliases and SELECT-list aliases. Those are legitimately absent
@@ -203,6 +208,11 @@ def extract_identifiers(sql: str, dialect: Optional[str] = None) -> Optional[Dic
                 locals_.add(name)
 
         tables: List[str] = []
+        # alias -> physical table it stands for. Without this a column qualified
+        # by an alias is unresolvable downstream and has to be checked against
+        # every column in the schema, which silently accepts the most common
+        # schema-linking error there is: the right column on the wrong table.
+        aliases: Dict[str, str] = {}
         for table_node in tree.find_all(exp.Table):
             name = table_node.name
             if not name:
@@ -214,6 +224,14 @@ def extract_identifiers(sql: str, dialect: Optional[str] = None) -> Optional[Dic
             alias = table_node.alias
             if alias:
                 locals_.add(alias)
+                norm_alias = normalize_identifier(alias)
+                # An alias reused for two different tables cannot be resolved to
+                # either one; drop it and let the union fallback handle it.
+                if norm_alias:
+                    if norm_alias in aliases and aliases[norm_alias] != name:
+                        aliases[norm_alias] = ''
+                    else:
+                        aliases.setdefault(norm_alias, name)
 
         columns: List[Tuple[Optional[str], str]] = []
         for column_node in tree.find_all(exp.Column):
@@ -223,7 +241,8 @@ def extract_identifiers(sql: str, dialect: Optional[str] = None) -> Optional[Dic
             qualifier = column_node.table or None
             columns.append((qualifier, name))
 
-        return {'tables': tables, 'columns': columns, 'locals': locals_}
+        return {'tables': tables, 'columns': columns, 'locals': locals_,
+                'aliases': {a: t for a, t in aliases.items() if t}}
     except Exception:
         return None
 
@@ -244,6 +263,10 @@ def diff_identifiers(extracted: Dict[str, Any], schema_index: Dict[str, Any],
     case-insensitively (see `case_sensitive_identifiers`); the unknown-* findings
     are dialect-independent and always reported.
 
+    ``extracted['aliases']`` (optional) maps a table alias to the table it was
+    declared for, which is what makes an alias-qualified column checkable against
+    its own table instead of against every column in the schema.
+
     Pure: no sqlglot, no database, no settings.
     """
     if not extracted or not schema_index_is_usable(schema_index):
@@ -254,6 +277,7 @@ def diff_identifiers(extracted: Dict[str, Any], schema_index: Dict[str, Any],
     all_columns: Dict[str, str] = schema_index.get('all_columns') or {}
 
     local_names = {normalize_identifier(n) for n in (extracted.get('locals') or set())}
+    alias_map: Dict[str, str] = extracted.get('aliases') or {}
 
     findings: List[Dict[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
@@ -285,9 +309,15 @@ def diff_identifiers(extracted: Dict[str, Any], schema_index: Dict[str, Any],
             continue
 
         norm_qual = normalize_identifier(qualifier) if qualifier else ''
-        # Only attribute a column to a specific table when the qualifier names a
-        # real schema table. A qualifier that is an alias or a derived table is
-        # unresolvable here, so fall back to the union of all columns.
+        # An alias is resolved back to the table it was declared for, so
+        # `FROM frpm f ... f."magnet"` is checked against frpm alone. A qualifier
+        # that names no known table and no resolvable alias (a derived table or a
+        # CTE) stays unresolvable, and those fall back to the union of all
+        # columns rather than being guessed at.
+        if norm_qual and norm_qual not in schema_tables:
+            resolved = normalize_identifier(alias_map.get(norm_qual, ''))
+            if resolved:
+                norm_qual = resolved
         scoped: Optional[Dict[str, str]] = None
         if norm_qual and norm_qual in schema_tables and norm_qual in schema_columns:
             scoped = schema_columns[norm_qual]
@@ -348,6 +378,10 @@ def format_identifier_feedback(findings: Sequence[Dict[str, str]],
     Deliberately explicit about the exact expected spelling — the whole point of
     the check is that the model got a character sequence wrong, so echoing the
     schema's spelling back is the actionable part.
+
+    When ``schema_index`` is supplied, an unknown column also names the table
+    that owns it (L-C); without it the message is exactly as before, so no
+    existing caller changes.
     """
     if not findings:
         return ''

@@ -8,9 +8,22 @@ Run inside the container:
     docker cp tests/test_sql_validate.py sqlbot:/tmp/
     docker exec sqlbot sh -c "cd /opt/sqlbot/app && .venv/bin/python -m pytest /tmp/test_sql_validate.py -v"
 """
+import os
 import sys
 
-sys.path.insert(0, '/opt/sqlbot/app')
+# Prefer an explicit SQLBOT_APP_ROOT, then the repo checkout this file lives in,
+# then the container path. A bare `sys.path.insert(0, '/opt/sqlbot/app')` silently
+# imports the INSTALLED module instead of the code under test, so edits to
+# backend/ appear to have no effect and tests fail for the wrong reason.
+_roots = [
+    os.environ.get('SQLBOT_APP_ROOT'),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'backend'),
+    '/opt/sqlbot/app',
+]
+for _root in _roots:
+    if _root and os.path.isdir(os.path.join(_root, 'apps')):
+        sys.path.insert(0, _root)
+        break
 
 import pytest
 
@@ -137,13 +150,89 @@ def test_locals_are_never_reported():
 
 
 def test_alias_qualifier_falls_back_to_global_column_lookup():
-    """An alias qualifier cannot be resolved to a table here, so the column is
-    checked against the union of all columns rather than guessed at."""
+    """An UNRESOLVABLE qualifier (no alias map supplied, as for a derived table or
+    a CTE) is checked against the union of all columns rather than guessed at."""
     index = build_schema_index(SCHEMA)
     ok = {'tables': ['finance_2a5f1b62ca'], 'columns': [('f', 'Status')], 'locals': {'f'}}
     assert diff_identifiers(ok, index) == []
     bad = {'tables': ['finance_2a5f1b62ca'], 'columns': [('f', 'Nonexistent')], 'locals': {'f'}}
     assert [f['kind'] for f in diff_identifiers(bad, index)] == ['unknown-column']
+
+
+def test_resolved_alias_catches_right_column_on_wrong_table():
+    """VendorName is a real column, but on vendors_9c1 — not on the table `f`
+    stands for. Without alias resolution the union lookup accepts this silently,
+    which is the dominant schema-linking error."""
+    index = build_schema_index(SCHEMA)
+    extracted = {
+        'tables': ['finance_2a5f1b62ca'],
+        'columns': [('f', 'VendorName')],
+        'locals': {'f'},
+        'aliases': {'f': 'finance_2a5f1b62ca'},
+    }
+    findings = diff_identifiers(extracted, index)
+    assert [f['kind'] for f in findings] == ['unknown-column']
+    assert findings[0]['identifier'] == 'f.VendorName'
+
+
+def test_resolved_alias_still_accepts_correct_column():
+    index = build_schema_index(SCHEMA)
+    extracted = {
+        'tables': ['finance_2a5f1b62ca', 'vendors_9c1'],
+        'columns': [('f', 'Status'), ('v', 'VendorName')],
+        'locals': {'f', 'v'},
+        'aliases': {'f': 'finance_2a5f1b62ca', 'v': 'vendors_9c1'},
+    }
+    assert diff_identifiers(extracted, index) == []
+
+
+def test_ambiguous_alias_is_not_resolved_to_a_guess():
+    """The same alias declared for two tables resolves to neither; the union
+    fallback must apply instead of silently picking one."""
+    index = build_schema_index(SCHEMA)
+    extracted = {
+        'tables': ['finance_2a5f1b62ca', 'vendors_9c1'],
+        'columns': [('x', 'VendorName')],
+        'locals': {'x'},
+        'aliases': {},   # extract_identifiers drops the ambiguous alias
+    }
+    assert diff_identifiers(extracted, index) == []
+
+
+@requires_sqlglot
+def test_extract_identifiers_maps_aliases_to_tables():
+    got = extract_identifiers(
+        'SELECT f."Amount", v."VendorName" FROM finance_2a5f1b62ca f '
+        'JOIN vendors_9c1 v ON f."Amount" = v."Amount"', 'postgres')
+    assert got['aliases'] == {'f': 'finance_2a5f1b62ca', 'v': 'vendors_9c1'}
+
+
+@requires_sqlglot
+def test_extract_identifiers_drops_ambiguous_alias():
+    got = extract_identifiers(
+        'SELECT x."Amount" FROM finance_2a5f1b62ca x, vendors_9c1 x', 'postgres')
+    assert 'x' not in got['aliases']
+
+
+@requires_sqlglot
+def test_extract_identifiers_does_not_map_a_cte_alias_to_a_table():
+    """A CTE is not a physical table, so an alias on a CTE reference must not
+    resolve to one — otherwise its projected columns get checked against the
+    wrong catalog."""
+    got = extract_identifiers(
+        'WITH recent AS (SELECT "Amount" AS total FROM finance_2a5f1b62ca) '
+        'SELECT r.total FROM recent r', 'postgres')
+    assert got['aliases'].get('r') is None
+
+
+@requires_sqlglot
+def test_end_to_end_catches_wrong_table_via_alias():
+    """The q83 failure: a real column, qualified with an alias for a table that
+    does not own it, reached PostgreSQL and errored there."""
+    findings = validate_sql_identifiers(
+        sql='SELECT f."VendorName" FROM finance_2a5f1b62ca f',
+        schema_str=SCHEMA, ds_type='pg')
+    assert [f['kind'] for f in findings] == ['unknown-column']
 
 
 def test_case_mismatch_suppressed_on_case_insensitive_dialects():
