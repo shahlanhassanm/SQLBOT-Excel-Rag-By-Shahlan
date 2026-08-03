@@ -52,9 +52,29 @@ services:
       # Second parallel SQL candidate on retries (self-consistency). Kept ON so
       # APEX is the only refinement stage that is disabled.
       AGENTIC_MULTI_CANDIDATE_ENABLED: "true"
+      # Prompt-level "every SQL must end in LIMIT 1000" rule. Disabled: display
+      # is already capped at 1000 rows downstream (save_sql_data), so the rule
+      # only caps CORRECTNESS — any answer larger than 1000 rows can never be
+      # complete, and it biases the model's SQL shape. Re-enable (or set the
+      # chat.limit_rows system param) if a datasource has tables so large that
+      # an unbounded scalar/aggregate query is a real resource concern.
+      GENERATE_SQL_QUERY_LIMIT_ENABLED: "false"
       # Multi-datasource question splitting. Kept ON so questions can span multiple
       # Excel files at once (costs ~1+ extra LLM call/question on cross-file queries).
       AGENTIC_DECOMPOSE_ENABLED: "true"
+      # Execution-based self-consistency. MEASURED OFF: on BIRD-150 it changed the
+      # answer roughly once per 20 questions and moved EX by 0.0pp (McNemar p=1.00)
+      # while raising median latency 19s -> 47s. It also needs sampling diversity to
+      # work at all, and the models now run at temperature 0 (greedy), so the extra
+      # same-model candidate is a near-duplicate of the primary.
+      # To retry it, set BOTH of these and drop N to 2 (primary + cross-model only).
+      AGENTIC_SELF_CONSISTENCY_ENABLED: "false"
+      AGENTIC_SELF_CONSISTENCY_MODEL: "qwen2.5-coder:7b"
+      AGENTIC_SELF_CONSISTENCY_N: "2"
+      # Statement timeout for generated SQL. A generated query with an OR join plus a
+      # correlated subquery was measured running 14.5 min, pinning a connection and a
+      # worker with no error surfaced; connect_timeout does not bound execution.
+      DS_STATEMENT_TIMEOUT: "120"
     volumes:
       - ./data/sqlbot/excel:/opt/sqlbot/data/excel
       - ./data/sqlbot/file:/opt/sqlbot/data/file
