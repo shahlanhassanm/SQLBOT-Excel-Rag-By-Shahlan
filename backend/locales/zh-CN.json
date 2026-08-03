@@ -56,7 +56,13 @@
     "invalid_origin": "域名校验失败【{origin}】"
   },
   "i18n_chat": {
-    "record_id_in_mcp": "响应ID: "
+    "record_id_in_mcp": "响应ID: ",
+    "ack_rules": "我已掌握所有规则，包括表结构、SQL规范、安全限制和输出格式，我会严格遵守这些规则。",
+    "ack_schema": "我已确认您提供的数据库信息与表结构schema，我生成的SQL不会超出您提供的范围。",
+    "ack_extra": "我已确认您提供的额外信息，我会进行参考。",
+    "ack_terminology": "我已确认您提供的术语信息，我会进行参考。",
+    "ack_training": "我已确认您提供的SQL示例，我会进行参考。",
+    "ack_chart_rules": "我已掌握所有规则，我会严格遵守这些规则来生成符合要求的JSON。"
   },
   "i18n_terminology": {
     "terminology_not_exists": "该术语不存在",

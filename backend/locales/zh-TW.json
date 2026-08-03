@@ -56,7 +56,13 @@
     "invalid_origin": "網域校驗失敗【{origin}】"
   },
   "i18n_chat": {
-    "record_id_in_mcp": "響應ID: "
+    "record_id_in_mcp": "響應ID: ",
+    "ack_rules": "我已掌握所有規則，包括表結構、SQL規範、安全限制和輸出格式，我會嚴格遵守這些規則。",
+    "ack_schema": "我已確認您提供的資料庫資訊與表結構schema，我生成的SQL不會超出您提供的範圍。",
+    "ack_extra": "我已確認您提供的額外資訊，我會進行參考。",
+    "ack_terminology": "我已確認您提供的術語資訊，我會進行參考。",
+    "ack_training": "我已確認您提供的SQL範例，我會進行參考。",
+    "ack_chart_rules": "我已掌握所有規則，我會嚴格遵守這些規則來生成符合要求的JSON。"
   },
   "i18n_terminology": {
     "terminology_not_exists": "該術語不存在",

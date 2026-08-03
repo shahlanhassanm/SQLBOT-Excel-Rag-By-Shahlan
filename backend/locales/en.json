@@ -56,7 +56,13 @@
     "invalid_origin": "Domain name validation failed【{origin}】"
   },
   "i18n_chat": {
-    "record_id_in_mcp": "Answer ID: "
+    "record_id_in_mcp": "Answer ID: ",
+    "ack_rules": "I have understood all the rules — table schema, SQL conventions, safety limits and output format — and will follow them strictly.",
+    "ack_schema": "I have confirmed the database information and table schema you provided; the SQL I generate will stay within them.",
+    "ack_extra": "I have noted the additional information you provided and will take it into account.",
+    "ack_terminology": "I have noted the terminology you provided and will take it into account.",
+    "ack_training": "I have noted the SQL examples you provided and will take them into account.",
+    "ack_chart_rules": "I have understood all the rules and will follow them strictly to produce JSON in the required format."
   },
   "i18n_terminology": {
     "terminology_not_exists": "This terminology does not exist",
