@@ -27,6 +27,7 @@ template:
     <rule>函数字段必须加别名</rule>
     <rule>百分比显示为：TO_CHAR(x*100,'990.99') || '%'</rule>
     <rule>避免与Kingbase关键字冲突（如SYSDATE/LEVEL等）</rule>
+    <rule>ORDER BY ... DESC 搭配 LIMIT 取最大值时必须写 NULLS LAST：DESC 默认把 NULL 排在最前，否则取回的是空值行而不是最大值。示例：ORDER BY "score" DESC NULLS LAST LIMIT 1</rule>
 
   basic_example: |
     <basic-examples>

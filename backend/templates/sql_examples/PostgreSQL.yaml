@@ -19,8 +19,30 @@ template:
     <rule>禁止使用星号(*)，必须明确字段名</rule>
     <rule>中文/特殊字符字段需保留原名并添加英文别名</rule>
     <rule>函数字段必须加别名</rule>
-    <rule>百分比字段保留两位小数并以%结尾</rule>
+    <rule>百分比 PERCENTAGE：仅当问题明确要求百分比（percentage / percent / %）时才乘以 100；问 rate / ratio / 比率 时原样返回比值，不乘 100。结果一律返回数值，禁止拼接 '%' 文本后缀。除法必须防零：CAST(分子 AS numeric) / NULLIF(分母, 0)</rule>
+    <rule>不要对计算结果做 ROUND / 截断，除非问题明确要求保留 N 位小数 —— 比值、平均值、比例按完整精度返回</rule>
     <rule>避免与数据库关键字冲突</rule>
+    <rule>ORDER BY ... DESC 搭配 LIMIT 取最大值时必须写 NULLS LAST：PostgreSQL 的 DESC 默认把 NULL 排在最前，否则取回的是空值行而不是最大值。示例：ORDER BY "score" DESC NULLS LAST LIMIT 1</rule>
+    <rule>
+      OUTPUT SHAPE（输出列形状）：SELECT 中只投影问题明确要求的列，绝不额外附加列。
+      问 "what is the highest X" 就只返回 X；不要为了"上下文"加 id、名称、计数或排序键列 —— 多出的列会使答案判错。
+      <note>
+        1. "most common X" → SELECT "X" ... GROUP BY "X" ORDER BY COUNT(*) DESC LIMIT 1（COUNT 只用于排序，不出现在 SELECT 中）
+        2. 问两项就返回两列，按问题顺序排列；排序/过滤用的列不需要出现在 SELECT 里
+      </note>
+    </rule>
+    <rule>
+      DISTINCT：OUTPUT SHAPE 的"不要多余"只约束列的数量，绝不表示可以省略 DISTINCT。
+      当 JOIN 会使一行扇出成多行（一对多关系），而问题只要求列出实体本身时，必须写 SELECT DISTINCT，否则返回重复行即为错误答案。
+      <note>
+        1. 例：列出某分子所有三键的原子 → SELECT DISTINCT "c"."atom_id", "c"."atom_id2"（经 bond→connected 扇出，不去重会重复）
+        2. 计数同理：统计不重复实体用 COUNT(DISTINCT "x")，不要用 COUNT(*)
+        3. 单表查询、聚合已按 GROUP BY 收敛时不需要 DISTINCT
+      </note>
+    </rule>
+    <rule>这是 PostgreSQL 而不是 SQLite：strftime / group_concat / IIF / instr / julianday 不存在，用 TO_CHAR、STRING_AGG、CASE WHEN、POSITION、EXTRACT 代替</rule>
+    <rule>ROUND 保留小数位必须先转 numeric：ROUND("x"::numeric, 2) —— ROUND(double precision, int) 不存在</rule>
+    <rule>禁止对 date/timestamp 列使用 LIKE（不存在 date~~text 运算符）；用范围比较（"d" >= DATE '1991-11-01' AND "d" < DATE '1991-12-01'）或 EXTRACT(YEAR FROM "d")</rule>
 
   basic_example: |
     <basic-examples>
@@ -44,7 +66,7 @@ template:
             "t1"."订单ID" AS "order_id",
             "t1"."金额" AS "amount",
             COUNT("t1"."订单ID") AS "total_orders",
-            ROUND("t1"."折扣率" * 100, 2) || '%' AS "discount_percent"
+            ROUND("t1"."折扣率"::numeric * 100, 2) AS "discount_percent"
           FROM "TEST"."ORDERS" "t1"
           LIMIT 100
         </output-good>
@@ -57,9 +79,9 @@ template:
           SELECT "user", ROUND(active_ratio) FROM "PUBLIC"."USERS"  -- 错误：百分比格式错误
         </output-bad>
         <output-good>
-          SELECT 
+          SELECT
             "u"."user" AS "username",
-            ROUND("u"."active_ratio" * 100, 2) || '%' AS "active_percent"
+            ROUND("u"."active_ratio"::numeric * 100, 2) AS "active_percent"
           FROM "PUBLIC"."USERS" "u"
           WHERE "u"."status" = 1
         </output-good>
