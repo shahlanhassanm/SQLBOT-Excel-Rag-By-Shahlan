@@ -95,6 +95,22 @@ class OpenAIAzureLLM(BaseLLM):
         )
 
 
+def _with_output_cap(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Add max_tokens unless the model's own config already sets it.
+
+    A model that falls into a repetition loop otherwise generates until the whole
+    context window is exhausted -- measured at ~45 minutes on one BIRD question,
+    unstoppable once started. Greedy decoding (temperature 0) makes loops MORE
+    likely because there is no sampling noise to break the cycle. An explicit
+    per-model max_tokens always wins over this default.
+    """
+    from common.core.config import settings
+    cap = getattr(settings, 'LLM_MAX_OUTPUT_TOKENS', 0)
+    if cap and cap > 0 and 'max_tokens' not in params:
+        params = {**params, 'max_tokens': cap}
+    return params
+
+
 class OpenAILLM(BaseLLM):
     def _init_llm(self) -> BaseChatModel:
         return BaseChatOpenAI(
@@ -102,7 +118,7 @@ class OpenAILLM(BaseLLM):
             api_key=self.config.api_key or 'Empty',
             base_url=self.config.api_base_url,
             stream_usage=True,
-            **self.config.additional_params,
+            **_with_output_cap(self.config.additional_params),
         )
 
     def generate(self, prompt: str) -> str:
